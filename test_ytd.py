@@ -8,17 +8,16 @@ import inspect
 import sys
 import traceback
 
-from ytd import (
-    YtdApp,
+from core import child_env, parse_progress
+from model import (
     apply_filters,
     availability_report,
     build_format_selector,
-    child_env,
     codec_name,
     human_size,
     parse_formats,
-    parse_progress,
 )
+from ytd import YtdApp
 
 # Fixture shaped after real `yt-dlp -J` output (Big Buck Bunny 4K probe).
 INFO = {
