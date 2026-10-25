@@ -208,6 +208,22 @@ def test_child_env_drops_uv_interpreter():
 
 
 URL = INFO["webpage_url"]
+PLAYLIST_URL = "https://www.youtube.com/playlist?list=PLtest"
+PLAYLIST = {
+    "_type": "playlist",
+    "id": "PLtest",
+    "title": "Test list",
+    "uploader": "Someone",
+    "entries": [
+        {"_type": "url", "id": "aaa", "url": "https://www.youtube.com/watch?v=aaa",
+         "title": "One", "duration": 100, "availability": "public"},
+        {"_type": "url", "id": "bbb", "url": "https://www.youtube.com/watch?v=bbb",
+         "title": "Two", "duration": 200, "availability": "public"},
+        {"_type": "url", "id": "ccc", "url": "https://www.youtube.com/watch?v=ccc",
+         "title": "Gone", "availability": "private"},
+        None,
+    ],
+}
 
 
 # --------------------------------------------------------------------------- #
@@ -546,6 +562,50 @@ async def test_app_analyze_failure_marks_error():
             job = app.jobs[0]
             assert "Video unavailable" in job.error
             assert str(app.queue().get_cell(str(job.uid), "status")).startswith("error:")
+    finally:
+        app_module.run_json = original
+
+
+async def test_app_expands_playlist_into_rows():
+    original = app_module.run_json
+
+    async def fake(url, *, flat=False, timeout=180):
+        return PLAYLIST, ""
+
+    app_module.run_json = fake
+    try:
+        app = YtdApp()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.add_url(PLAYLIST_URL)
+            assert await pump(pilot, lambda: len(app.jobs) == 3)
+            assert [job.title for job in app.jobs] == ["One", "Two", "Gone"]
+            assert all(job.url.startswith("https://www.youtube.com/watch?v=") for job in app.jobs)
+            assert app.jobs[2].status is Status.ERROR
+            assert "private" in app.jobs[2].error
+            assert app.jobs[0].status is Status.LOADED
+            assert not any(job.formats for job in app.jobs)  # lazy
+            assert app.queue().row_count == 3
+            assert app.focused_uid == app.jobs[0].uid
+    finally:
+        app_module.run_json = original
+
+
+async def test_app_playlist_skips_urls_already_queued():
+    original = app_module.run_json
+
+    async def fake(url, *, flat=False, timeout=180):
+        return PLAYLIST, ""
+
+    app_module.run_json = fake
+    try:
+        existing = {"_type": "video", "title": "Already here", "formats": []}
+        app = YtdApp(seed=[("https://www.youtube.com/watch?v=aaa", existing)])
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.add_url(PLAYLIST_URL)
+            assert await pump(pilot, lambda: len(app.jobs) == 3)
+            assert [job.title for job in app.jobs] == ["Already here", "Two", "Gone"]
     finally:
         app_module.run_json = original
 

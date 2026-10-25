@@ -265,11 +265,7 @@ Screen { layout: vertical; }
 
     def absorb_info(self, job: Job, info: dict) -> None:
         if info.get("_type") == "playlist":
-            entries = info.get("entries") or []
-            job.status = Status.ERROR
-            job.error = f"playlist with {len(entries)} entries (not supported yet)"
-            job.title = info.get("title") or job.url
-            self.post_message(JobChanged(job.uid))
+            self.expand_playlist(job, info)
             return
         from model import parse_formats
 
@@ -280,6 +276,41 @@ Screen { layout: vertical; }
         if not job.video_id and not job.audio_id:
             job.video_id, job.audio_id = default_selection(job.formats)
         self.post_message(JobChanged(job.uid))
+
+    def expand_playlist(self, job: Job, info: dict) -> None:
+        """One row per flat entry; formats stay lazy until the row is inspected."""
+        entries = [entry for entry in (info.get("entries") or []) if entry]
+        if not entries:
+            job.status = Status.ERROR
+            job.error = "empty playlist"
+            self.post_message(JobChanged(job.uid))
+            return
+        index = self.jobs.index(job) if job in self.jobs else 0
+        self.jobs.remove(job)
+        added: list[Job] = []
+        for entry in entries:
+            url = entry.get("url") or entry.get("webpage_url") or ""
+            if not url and entry.get("id"):
+                url = f"https://www.youtube.com/watch?v={entry['id']}"
+            if not url or any(existing.url == url for existing in self.jobs):
+                continue
+            new = Job(uid=self._next_uid, url=url)
+            self._next_uid += 1
+            new.title = entry.get("title") or url
+            new.uploader = entry.get("uploader") or info.get("uploader") or ""
+            new.duration = entry.get("duration")
+            if entry.get("availability") in ("private", "premium_only", "subscriber_only"):
+                new.status = Status.ERROR
+                new.error = f"unavailable ({entry['availability']})"
+            added.append(new)
+        self.jobs[index:index] = added
+        if self.focused_uid == job.uid:
+            self.focused_uid = added[0].uid if added else None
+        self.refresh_queue()
+        self.refresh_focused()
+        title = info.get("title") or "playlist"
+        self.write_log(f"[dim]playlist '{title}': {len(added)} row(s)[/dim]")
+        self.notify(f"{len(added)} rows from {title}" if added else "Nothing to add.")
 
     @work(exclusive=False, group="analyze")
     async def analyze_job(self, job: Job) -> None:

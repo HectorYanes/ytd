@@ -43,7 +43,7 @@ and has not asked for it.
 | --- | --- | --- | --- | --- |
 | T1 | S8 | inline | done | `c9d65ad` |
 | T2 | S1, S4, S8 | inline | done | this slice |
-| T3 | S6, S9 (dedupe), S2/S3 lazy | inline | partial — dedupe, lazy analyze and per-row isolation done; playlist expansion pending | — |
+| T3 | S6, S9 (dedupe), S2/S3 lazy | inline | done | this slice |
 | T4 | S7 | inline | done — pool + `-j` flag + concurrency test | this slice |
 | T5 | S2/S3 editor, S5 | inline | pending | — |
 
@@ -79,3 +79,8 @@ and has not asked for it.
   is now a `YtdlpError` instead of a `NoneType` crash.
 - **Decision** (T4): the confirm modal for >20 rows was dropped; it was my
   idea, not a spec, and `s` is already explicit.
+- **L6** (T3, S6): `expand_playlist` replaces the placeholder row with one
+  lazy row per flat entry (title/uploader/duration from the entry), marks
+  `private`/`premium_only`/`subscriber_only` entries `error: unavailable (…)`,
+  drops `None` entries, keeps the position, and skips URLs already queued.
+  Tests: 41/41.
