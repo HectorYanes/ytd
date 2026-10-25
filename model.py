@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 
 
 YOUTUBE_HLS = "m3u8"
@@ -281,3 +282,144 @@ def build_format_selector(video_id: str | None, audio_id: str | None) -> str:
         return f"{video_id}+{audio_id}"
     return video_id or audio_id or ""
 
+
+
+# --------------------------------------------------------------------------- #
+# queue model
+# --------------------------------------------------------------------------- #
+class Status(str, Enum):
+    """Job states. Labels follow the vocabulary the user asked for."""
+
+    LOADED = "cargada"
+    DOWNLOADING = "descargando"
+    DONE = "completado"
+    ERROR = "error"
+    CANCELLED = "cancelado"
+
+
+STATUS_STYLE = {
+    Status.LOADED: "white",
+    Status.DOWNLOADING: "cyan",
+    Status.DONE: "green",
+    Status.ERROR: "red",
+    Status.CANCELLED: "yellow",
+}
+
+def status_label(status: Status, percent: float = 0.0, error: str = "") -> str:
+    if status is Status.DOWNLOADING:
+        return f"descargando ({percent:.0f}%)"
+    if status is Status.ERROR:
+        return f"error: {error}" if error else "error"
+    return status.value
+
+
+def default_selection(
+    formats: list[Fmt], prefer_audio_codec: str | None = None
+) -> tuple[str | None, str | None]:
+    """Best video (+ audio when the video stream carries none)."""
+    videos = [f for f in formats if f.available and f.kind == "video" and not f.is_hls]
+    if not videos:
+        videos = [f for f in formats if f.available and f.kind == "video"]
+    muxed = [f for f in formats if f.available and f.kind == "muxed" and not f.is_hls]
+    if not muxed:
+        muxed = [f for f in formats if f.available and f.kind == "muxed"]
+
+    video: Fmt | None = None
+    if videos:
+        video = max(videos, key=lambda f: (f.height or 0, f.fps or 0, f.tbr or 0))
+    elif muxed:
+        video = max(muxed, key=lambda f: (f.height or 0, f.fps or 0, f.tbr or 0))
+    if video is None:
+        return None, None
+    if video.kind == "muxed":
+        return video.id, None
+
+    audios = [f for f in formats if f.kind == "audio"]
+    if not audios:
+        return video.id, None
+    if prefer_audio_codec:
+        preferred = [a for a in audios if a.acodec_name == prefer_audio_codec]
+        if preferred:
+            audios = preferred
+    audio = max(audios, key=lambda f: (f.abr or f.tbr or 0, f.size or 0))
+    return video.id, audio.id
+
+
+@dataclass
+class Job:
+    """One queue row: a URL plus its formats, choice and download state."""
+
+    uid: int
+    url: str
+    title: str = ""
+    uploader: str = ""
+    duration: float | None = None
+    formats: list[Fmt] = field(default_factory=list)
+    video_id: str | None = None
+    audio_id: str | None = None
+    status: Status = Status.LOADED
+    percent: float = 0.0
+    speed: str = ""
+    eta: str = ""
+    size: str = ""
+    error: str = ""
+    path: str | None = None
+
+    @property
+    def analyzed(self) -> bool:
+        return bool(self.formats)
+
+    def find(self, fmt_id: str | None) -> Fmt | None:
+        if not fmt_id:
+            return None
+        return next((f for f in self.formats if f.id == fmt_id), None)
+
+    def video(self) -> Fmt | None:
+        return self.find(self.video_id)
+
+    def audio(self) -> Fmt | None:
+        return self.find(self.audio_id)
+
+    def selector(self) -> str:
+        """Explicit `-f` value, empty when yt-dlp should use the config default."""
+        return build_format_selector(self.video_id, self.audio_id)
+
+    def label(self, limit: int = 58) -> str:
+        text = self.title or self.url
+        return text if len(text) <= limit else text[: limit - 1] + "…"
+
+    def quality_label(self) -> str:
+        if not self.analyzed or not self.video_id:
+            return "auto (best)"
+        fmt = self.video()
+        if fmt is None:
+            return "auto (best)"
+        codec = fmt.vcodec_name or "?"
+        if fmt.kind == "muxed":
+            return f"{fmt.resolution} · {codec} (muxed)"
+        return f"{fmt.resolution} · {codec}"
+
+    def audio_label(self) -> str:
+        video = self.video()
+        if self.analyzed and video is not None and video.kind == "muxed":
+            return "— (incluido)"
+        if not self.analyzed or not self.audio_id:
+            return "auto (best)"
+        fmt = self.audio()
+        if fmt is None:
+            return "auto (best)"
+        return f"{fmt.acodec_name or '?'} {human_bitrate(fmt.abr or fmt.tbr)}"
+
+    def expected_size(self) -> int | None:
+        total = 0
+        counted = False
+        for fmt in (self.video(), self.audio()):
+            if fmt is not None and fmt.size:
+                total += fmt.size
+                counted = True
+        if counted:
+            return total
+        return self.video().size if self.video() and self.video().size else None
+
+    def size_label(self) -> str:
+        return human_size(self.expected_size())

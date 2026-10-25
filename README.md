@@ -1,36 +1,55 @@
-# ytd — a format explorer TUI for yt-dlp
+# ytd — a queue TUI for yt-dlp
 
-`yt-dlp -F` prints an unreadable wall of 47 rows. You cannot search it, you
-cannot see which qualities need a separate audio stream, and you cannot tell a
-progressive MP4 from an HLS variant without squinting. `ytd` turns that output
-into a filterable table and downloads exactly what you pick.
+Paste one link or twenty. Each one becomes a row with the quality it will
+download, the audio that goes with it, and a live status. The format table
+below is for the focused row only, so you see 8 filters and one video instead
+of `yt-dlp -F`'s wall of 47 rows.
 
 ## Install
 
 ```bash
-# already installed at ~/.local/bin/ytd (symlink into ~/.local/bin)
+# already installed at ~/.local/bin/ytd (symlink into ~/tools/ytd/ytd.py)
 ln -sf ~/tools/ytd/ytd.py ~/.local/bin/ytd
 
-ytd                      # empty, paste a URL
-ytd 'https://youtu.be/…' # analyze on start
-ytd -o ~/Videos 'URL'    # custom output directory
+ytd                                  # empty queue, paste URLs
+ytd 'https://youtu.be/…' 'https://…'  # queue them on start
+ytd -o ~/Videos -j 4 'URL'           # custom dir, 4 downloads at once
 ```
 
-Requires `yt-dlp` and `ffmpeg` in `PATH`. The script itself is a PEP 723 uv
-script: `uv run` provisions Textual on first launch, nothing global.
+Requires `yt-dlp` and `ffmpeg` in `PATH`. The script is a PEP 723 uv script:
+`uv run` provisions Textual on first launch, nothing global.
+
+## The queue
+
+| column | meaning |
+| --- | --- |
+| `#` | row order |
+| `título` | video title (the URL until analyzed) |
+| `calidad` | video stream that will be used, `auto (best)` when unnamed |
+| `audio` | audio stream, or `— (incluido)` for muxed formats |
+| `estado` | `cargada`, `descargando (45%)`, `completado`, `error: …`, `cancelado` |
+| `tamaño` | expected size from the format metadata |
+
+Pasting a link appends a row and analyzes it in the background
+(`yt-dlp -J --flat-playlist`, one call handles both single videos and
+playlists). Duplicate URLs are skipped with a notice. A failure marks only its
+own row.
 
 ## Keys
 
 | key | action |
 | --- | --- |
-| `Enter` in the URL field | analyze the URL |
-| `v` | set the highlighted row as the **video** part |
-| `a` | set the highlighted row as the **audio** part |
-| `d` | download the current selection |
-| `y` | copy the equivalent `yt-dlp -f …` command |
+| `Enter` in the URL field | queue the URL(s), space separated |
+| `v` | set the highlighted format row as the **video** part |
+| `a` | set the highlighted format row as the **audio** part |
+| `e` | analyze the focused row (formats are fetched lazily) |
+| `d` | download the focused row |
+| `s` | download every pending row |
+| `x` | cancel the focused download |
+| `Delete` | remove the focused row |
+| `r` | reset the choice back to the automatic pick |
 | `f` | jump to the filter box |
 | `l` | toggle the log pane |
-| `r` | clear the selection |
 | `q` | quit |
 
 Filtering is live: the free-text box matches id, extension, kind, resolution,
@@ -45,12 +64,16 @@ does not exist as a single file. `ytd` makes that explicit: `v` + `a` builds
 `-f 137+140`, and the availability panel tells you which heights are muxed,
 which are HLS-only, and which are video-only.
 
+If you never pick, the row downloads with **no `-f` at all**, so your yt-dlp
+config's `--format "bv*+ba/b"` decides.
+
 ## Interaction with your yt-dlp config
 
 `~/.config/yt-dlp/config` is still loaded (cookies, output template, merge
 container, embedding). `ytd` only overrides two things:
 
-- `-f` — your selection wins over `--format` in the config.
+- `-f` — your selection wins over `--format` in the config, and only when you
+  selected something.
 - `-P home:<dir>` — the output directory, verified to override a `--paths`
   entry from the config.
 
@@ -65,22 +88,21 @@ container, embedding). `ytd` only overrides two things:
   `--cookies-from-browser …+gnomekeyring` dies with "cannot decrypt v11
   cookies". `child_env()` prunes the uv entries from the child PATH.
 - **A non-zero exit can still carry usable JSON.** yt-dlp exits 1 when a cookie
-  backend warns while still emitting complete metadata, so the JSON payload is
-  preferred over the exit code.
+  backend warns while still emitting complete metadata, so the payload wins
+  over the exit code — but a literal `null` payload is an error, not a video.
+- **One asyncio worker per concurrency slot.** `DownloadManager` reads yt-dlp's
+  `--newline` progress from stdout, so no threads and no polling.
+- **Symlink launcher.** `sys.path[0]` becomes `~/.local/bin` when `ytd.py` is a
+  symlink, so the entry inserts its real directory before importing `app`.
 
 ## Tests
 
 ```bash
-uv run --with textual python test_ytd.py     # 23 tests, no pytest needed
+uv run --with textual python test_ytd.py     # no pytest needed
 ```
 
 Covers codec mapping, format classification, size fallbacks, every filter,
-the availability report, progress parsing, the child environment, and the
-TUI itself (row rendering, filtering, selection, command building, and a
-small-terminal layout regression at 80x24).
-
-## Not implemented yet
-
-- Playlists (the app says so instead of guessing which entry you meant).
-- Live manifests beyond what the `formats` array exposes.
-- Per-format subtitle and chapter pickers — the config's defaults apply.
+the availability report, progress parsing, the child environment, the queue
+model, the download pool (progress, errors, cancel, concurrency cap, dedupe),
+the JSON guard, and the TUI itself (rows, filtering, selection, status cells,
+key bindings, and an 80x24 layout regression).

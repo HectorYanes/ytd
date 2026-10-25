@@ -8,14 +8,26 @@ import inspect
 import sys
 import traceback
 
-from core import child_env, parse_progress
+import app as app_module
+from core import (
+    DownloadManager,
+    YtdlpError,
+    decode_json,
+    child_env,
+    download_command,
+    parse_progress,
+)
 from model import (
+    Job,
+    Status,
     apply_filters,
     availability_report,
     build_format_selector,
     codec_name,
+    default_selection,
     human_size,
     parse_formats,
+    status_label,
 )
 from ytd import YtdApp
 
@@ -195,13 +207,71 @@ def test_child_env_drops_uv_interpreter():
     assert env["HOME"] == "/home/u"
 
 
-async def test_app_layout_survives_short_terminal():
-    """Regression: fixed heights used to collapse the table to 0 rows at 80x24."""
-    app = YtdApp(info=INFO)
-    async with app.run_test(size=(80, 24)) as pilot:
-        await pilot.pause()
-        assert app.row_count() > 0
-        assert app.table().size.height >= 3
+URL = INFO["webpage_url"]
+
+
+# --------------------------------------------------------------------------- #
+# fakes
+# --------------------------------------------------------------------------- #
+class FakeProc:
+    """Stands in for an asyncio subprocess running yt-dlp."""
+
+    def __init__(self, lines=(), code=0, hold=None):
+        self._lines = [line.encode() for line in lines]
+        self._code = code
+        self._hold = hold
+        self.terminated = False
+        self.stdout = self
+
+    async def readline(self):
+        if self.terminated:
+            return b""
+        if self._lines:
+            return self._lines.pop(0) + b"\n"
+        while self._hold is not None and not self._hold.is_set():
+            if self.terminated:
+                return b""
+            try:
+                await asyncio.wait_for(asyncio.shield(self._hold.wait()), 0.01)
+            except asyncio.TimeoutError:
+                pass
+        return b""
+
+    async def wait(self):
+        await asyncio.sleep(0)
+        return -15 if self.terminated else self._code
+
+    def terminate(self):
+        self.terminated = True
+
+
+def spawner(proc_factory, seen=None):
+    async def spawn(cmd):
+        if seen is not None:
+            seen.append(cmd)
+        return proc_factory()
+
+    return spawn
+
+
+async def wait_until(predicate, timeout=3.0):
+    loop = asyncio.get_running_loop()
+    end = loop.time() + timeout
+    while loop.time() < end:
+        if predicate():
+            return True
+        await asyncio.sleep(0.01)
+    return False
+
+
+async def pump(pilot, predicate, timeout=3.0):
+    loop = asyncio.get_running_loop()
+    end = loop.time() + timeout
+    while loop.time() < end:
+        if predicate():
+            return True
+        await pilot.pause(0.02)
+    return False
 
 
 def test_build_format_selector():
@@ -235,11 +305,178 @@ def test_parse_progress_ignores_other_lines():
     assert parse_progress('') is None
 
 
+# --------------------------------------------------------------------------- #
+# queue model
+# --------------------------------------------------------------------------- #
+def test_status_label_variants():
+    assert status_label(Status.LOADED) == "cargada"
+    assert status_label(Status.DOWNLOADING, 45.4) == "descargando (45%)"
+    assert status_label(Status.DONE, 100) == "completado"
+    assert status_label(Status.ERROR, error="boom") == "error: boom"
+
+
+def test_default_selection_picks_best_video_and_audio():
+    formats = parse_formats(INFO)
+    video_id, audio_id = default_selection(formats)
+    assert video_id == "401"  # 2160p av1 video-only
+    assert audio_id == "140"  # highest-bitrate audio
+
+
+def test_default_selection_muxed_has_no_audio_pair():
+    formats = parse_formats({"formats": [INFO["formats"][3]]})  # only format 18
+    assert default_selection(formats) == ("18", None)
+
+
+def test_job_labels_and_selector():
+    job = Job(uid=1, url=URL)
+    assert job.selector() == ""
+    assert job.quality_label() == "auto (best)"
+    assert job.audio_label() == "auto (best)"
+    job.formats = parse_formats(INFO)
+    job.video_id, job.audio_id = "299", "140"
+    assert job.selector() == "299+140"
+    assert job.quality_label() == "1080p60 · h264"
+    assert job.audio_label() == "aac 130k"
+    assert job.size_label() != "—"
+    job.video_id, job.audio_id = "18", None
+    assert job.selector() == "18"
+    assert job.audio_label() == "— (incluido)"
+
+
+def test_decode_json_rejects_null_payload():
+    try:
+        decode_json("null", "ERROR: [youtube] x: This video is unavailable", 1)
+    except YtdlpError as exc:
+        assert "unavailable" in str(exc)
+    else:
+        raise AssertionError("expected YtdlpError")
+    assert decode_json('{"_type": "video"}', "", 0) == {"_type": "video"}
+
+
+def test_download_command_omits_format_when_auto():
+    job = Job(uid=1, url=URL)
+    cmd = download_command(job, "/tmp/out", binary="yt-dlp")
+    assert cmd[:1] == ["yt-dlp"]
+    assert "-f" not in cmd
+    assert cmd[1:3] == ["-P", "home:/tmp/out"]
+    assert cmd[-1] == URL
+    job.video_id, job.audio_id = "299", "140"
+    cmd = download_command(job, "/tmp/out", binary="yt-dlp")
+    assert cmd[1:3] == ["-f", "299+140"]
+
+
+# --------------------------------------------------------------------------- #
+# download manager
+# --------------------------------------------------------------------------- #
+async def test_manager_reports_progress_then_done():
+    hold = asyncio.Event()
+    proc = FakeProc(
+        [
+            "[download]  45.2% of  1.32GiB at    2.10MiB/s ETA 00:12",
+            "[download] Destination: /tmp/out/a.mp4",
+        ],
+        hold=hold,
+    )
+    updates = []
+    manager = DownloadManager(
+        outdir="/tmp/out", max_concurrent=1,
+        on_update=lambda job: updates.append((job.status, job.percent)),
+        spawn=spawner(lambda: proc),
+    )
+    manager.start()
+    job = Job(uid=1, url=URL)
+    assert manager.submit([job]) == 1
+    assert await wait_until(lambda: job.status is Status.DOWNLOADING and job.percent)
+    assert job.percent == 45.2
+    assert job.speed == "2.10MiB/s"
+    assert job.path == "/tmp/out/a.mp4"
+    hold.set()
+    assert await wait_until(lambda: job.status is Status.DONE)
+    assert job.percent == 100
+    assert any(status is Status.DOWNLOADING and pct == 45.2 for status, pct in updates)
+    await manager.stop()
+
+
+async def test_manager_reports_error_line():
+    manager = DownloadManager(
+        outdir="/tmp/out", max_concurrent=1,
+        spawn=spawner(lambda: FakeProc(["ERROR: [youtube] xyz: Private video"], code=1)),
+    )
+    manager.start()
+    job = Job(uid=1, url=URL)
+    manager.submit([job])
+    assert await wait_until(lambda: job.status is Status.ERROR)
+    assert job.error == "[youtube] xyz: Private video"
+    await manager.stop()
+
+
+async def test_manager_cancel_keeps_cancelled_status():
+    hold = asyncio.Event()
+    manager = DownloadManager(
+        outdir="/tmp/out", max_concurrent=1, spawn=spawner(lambda: FakeProc(hold=hold)),
+    )
+    manager.start()
+    job = Job(uid=1, url=URL)
+    manager.submit([job])
+    assert await wait_until(lambda: job.status is Status.DOWNLOADING)
+    job.status = Status.CANCELLED
+    assert manager.cancel(job.uid) is True
+    assert await wait_until(lambda: manager.running_count == 0)
+    assert job.status is Status.CANCELLED
+    await manager.stop()
+
+
+async def test_manager_caps_concurrency():
+    holds = [asyncio.Event() for _ in range(4)]
+    procs = iter([FakeProc(hold=hold) for hold in holds])
+    manager = DownloadManager(
+        outdir="/tmp/out", max_concurrent=2, spawn=spawner(lambda: next(procs)),
+    )
+    manager.start()
+    jobs = [Job(uid=i + 1, url=f"https://example.com/{i}") for i in range(4)]
+    assert manager.submit(jobs) == 4
+    assert await wait_until(lambda: manager.running_count == 2)
+    assert manager.max_observed == 2
+    for hold in holds:
+        hold.set()
+    assert await wait_until(lambda: all(j.status is Status.DONE for j in jobs))
+    assert manager.max_observed == 2
+    await manager.stop()
+
+
+async def test_manager_dedupes_and_retries():
+    manager = DownloadManager(
+        outdir="/tmp/out", max_concurrent=1,
+        spawn=spawner(lambda: FakeProc(["ERROR: nope"], code=1)),
+    )
+    manager.start()
+    job = Job(uid=1, url=URL)
+    assert manager.submit([job]) == 1
+    assert manager.submit([job]) == 0
+    assert await wait_until(lambda: job.status is Status.ERROR)
+    assert manager.submit([job]) == 1
+    assert await wait_until(lambda: manager.running_count == 0)
+    await manager.stop()
+
+
+# --------------------------------------------------------------------------- #
+# app
+# --------------------------------------------------------------------------- #
+async def test_app_layout_survives_short_terminal():
+    """Regression: fixed heights used to collapse the table to 0 rows at 80x24."""
+    app = YtdApp(seed=[(URL, INFO)])
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        assert app.queue().row_count == 1
+        assert app.queue().size.height >= 3
+        assert app.row_count() > 0
+
+
 async def test_app_renders_all_and_filters_rows():
-    app = YtdApp(info=INFO)
+    app = YtdApp(seed=[(URL, INFO)])
     async with app.run_test() as pilot:
         await pilot.pause()
-        assert app.row_count() == len(INFO["formats"]) - 1  # storyboard hidden by default
+        assert app.row_count() == len(INFO["formats"]) - 1  # storyboard hidden
         app.query_one("#filter").value = "1080"
         await pilot.pause()
         assert app.row_count() == 3
@@ -247,37 +484,141 @@ async def test_app_renders_all_and_filters_rows():
 
 
 async def test_app_selection_builds_selector():
-    app = YtdApp(info=INFO)
+    app = YtdApp(seed=[(URL, INFO)])
     async with app.run_test() as pilot:
         await pilot.pause()
-        app.select_video("299")
-        app.select_audio("140")
+        job = app.jobs[0]
+        assert app.pick_video("299") is True
+        assert app.pick_audio("140") is True
         await pilot.pause()
-        assert app.selector() == "299+140"
-        app.select_video("18")
-        await pilot.pause()
-        assert app.selector() == "18"
-        assert app.selected_audio is None
+        assert job.selector() == "299+140"
+        assert app.pick_video("18") is True
+        assert job.selector() == "18"
+        assert job.audio_id is None
 
 
 async def test_app_rejects_wrong_kind():
-    app = YtdApp(info=INFO)
+    app = YtdApp(seed=[(URL, INFO)])
     async with app.run_test() as pilot:
         await pilot.pause()
-        assert app.select_audio("299") is False
-        assert app.select_video("140") is False
+        assert app.pick_audio("299") is False
+        assert app.pick_video("140") is False
 
 
-async def test_app_command_line_uses_ytdlp_and_respects_dir():
-    app = YtdApp(info=INFO, outdir="/tmp/opencode/x")
+async def test_app_analyze_loads_formats():
+    original = app_module.run_json
+    calls = []
+
+    async def fake(url, *, flat=False, timeout=180):
+        calls.append((url, flat))
+        return INFO, ""
+
+    app_module.run_json = fake
+    try:
+        app = YtdApp()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.add_url(URL)
+            assert await pump(pilot, lambda: app.jobs and app.jobs[0].analyzed)
+            job = app.jobs[0]
+            assert calls == [(URL, True)]
+            assert job.title == INFO["title"]
+            assert app.queue().row_count == 1
+            assert str(app.queue().get_cell(str(job.uid), "status")) == "cargada"
+            assert app.row_count() > 0
+    finally:
+        app_module.run_json = original
+
+
+async def test_app_analyze_failure_marks_error():
+    original = app_module.run_json
+
+    async def fake(url, *, flat=False, timeout=180):
+        raise YtdlpError("Video unavailable")
+
+    app_module.run_json = fake
+    try:
+        app = YtdApp()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.add_url(URL)
+            assert await pump(pilot, lambda: app.jobs and app.jobs[0].status is Status.ERROR)
+            job = app.jobs[0]
+            assert "Video unavailable" in job.error
+            assert str(app.queue().get_cell(str(job.uid), "status")).startswith("error:")
+    finally:
+        app_module.run_json = original
+
+
+async def test_app_add_url_dedupes():
+    original = app_module.run_json
+
+    async def fake(url, *, flat=False, timeout=180):
+        return INFO, ""
+
+    app_module.run_json = fake
+    try:
+        app = YtdApp(seed=[(URL, INFO)])
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.add_url(URL)
+            await pilot.pause()
+            assert len(app.jobs) == 1
+            assert app.queue().row_count == 1
+    finally:
+        app_module.run_json = original
+
+
+async def test_app_download_updates_row_status():
+    hold = asyncio.Event()
+    proc = FakeProc(["[download]  45.2% of  1.32GiB at 2.10MiB/s ETA 00:12"], hold=hold)
+    app = YtdApp(seed=[(URL, INFO)], spawn=spawner(lambda: proc))
     async with app.run_test() as pilot:
         await pilot.pause()
-        app.select_video("299")
-        app.select_audio("251")
-        cmd = app.download_command()
-        assert cmd[0].endswith("yt-dlp") or cmd[0] == "yt-dlp"
-        assert "-f" in cmd and "299+251" in cmd
-        assert "/tmp/opencode/x" in " ".join(cmd)
+        job = app.jobs[0]
+        app.action_download()
+        assert await pump(pilot, lambda: job.percent > 0)
+        cell = str(app.queue().get_cell(str(job.uid), "status"))
+        assert cell == "descargando (45%)"
+        hold.set()
+        assert await pump(pilot, lambda: job.status is Status.DONE)
+        assert str(app.queue().get_cell(str(job.uid), "status")) == "completado"
+
+
+async def test_app_key_bindings_do_not_crash():
+    hold = asyncio.Event()
+    app = YtdApp(seed=[(URL, INFO)], spawn=spawner(lambda: FakeProc(hold=hold)))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        for key in ("down", "up", "tab", "v", "a", "r", "e", "f", "l", "l", "enter"):
+            await pilot.press(key)
+            await pilot.pause()
+        app.action_start_all()
+        await pilot.pause()
+        app.queue().focus()
+        await pilot.press("x")
+        await pilot.pause()
+        await pilot.press("delete")
+        await pilot.pause()
+        assert app.jobs == []
+    hold.set()
+
+
+async def test_app_delete_and_cancel_bindings():
+    hold = asyncio.Event()
+    app = YtdApp(
+        seed=[(URL, INFO)], spawn=spawner(lambda: FakeProc(hold=hold)),
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        job = app.jobs[0]
+        app.action_download()
+        assert await pump(pilot, lambda: job.status is Status.DOWNLOADING)
+        app.action_cancel_job()
+        assert job.status is Status.CANCELLED
+        app.action_delete_job()
+        assert app.jobs == []
+        assert app.queue().row_count == 0
 
 
 def main() -> int:

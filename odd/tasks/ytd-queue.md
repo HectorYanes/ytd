@@ -41,11 +41,11 @@ and has not asked for it.
 
 | id | specs | route | status | commit |
 | --- | --- | --- | --- | --- |
-| T1 | S8 | inline | done | see log |
-| T2 | S1, S4, S8 | inline | done | see log |
-| T3 | S6, S9 (dedupe), S2/S3 lazy | inline | done | see log |
-| T4 | S7 | inline | done | see log |
-| T5 | S2/S3 editor, S5 | inline | done | see log |
+| T1 | S8 | inline | done | `c9d65ad` |
+| T2 | S1, S4, S8 | inline | done | this slice |
+| T3 | S6, S9 (dedupe), S2/S3 lazy | inline | partial — dedupe, lazy analyze and per-row isolation done; playlist expansion pending | — |
+| T4 | S7 | inline | done — pool + `-j` flag + concurrency test | this slice |
+| T5 | S2/S3 editor, S5 | inline | pending | — |
 
 ## Log
 
@@ -66,3 +66,16 @@ and has not asked for it.
 - **Decision**: the default download path passes no `-f` at all, so yt-dlp uses
   the config's own `--format "bv*+ba/b"`; per-video formats are fetched lazily
   only when the row is inspected.
+- **L5** (implementation, T2+T4): `core.py` grew `YtdlpError`, `decode_json`,
+  `run_json`, `download_command` and `DownloadManager` (N asyncio workers,
+  `--newline` progress, cancel, dedupe, per-row error isolation). `app.py` is
+  the queue UI (DataTable + format explorer for the focused row, `JobChanged`
+  message for per-row redraw, lazy `e` analyze). `ytd.py` is now a thin entry
+  with the `sys.path` fix and the `-j/--j` flag (default 3). Tests: 39/39.
+  Evidence: real end-to-end on Big Buck Bunny — 47 formats parsed, default
+  pick `315+258`, explicit `-f 18` downloaded to the captured path with
+  progress samples 0→100%, `completado`. `run_json` found a real bug: an
+  unavailable video makes yt-dlp print the literal `null` with exit 1, which
+  is now a `YtdlpError` instead of a `NoneType` crash.
+- **Decision** (T4): the confirm modal for >20 rows was dropped; it was my
+  idea, not a spec, and `s` is already explicit.
