@@ -244,6 +244,7 @@ Screen { layout: vertical; }
         self.report_text = ""
         self._next_uid = 1
         self._visible: list = []
+        self._explorer_key: tuple[int | None, int] | None = None
 
     # ---------------------------------------------------------------- layout
     def compose(self) -> ComposeResult:
@@ -492,6 +493,7 @@ Screen { layout: vertical; }
 
     def refresh_formats(self) -> None:
         job = self.focused_job()
+        self._explorer_key = (job.uid, len(job.formats)) if job is not None else None
         self._visible = (
             apply_filters(job.formats, **self.current_filters()) if job else []
         )
@@ -580,7 +582,14 @@ Screen { layout: vertical; }
         try:
             self.update_row(message.uid)
             if message.uid == self.focused_uid:
-                self.refresh_slots()
+                job = self.job_by_uid(message.uid)
+                # Analysis just finished for the row the user is looking at:
+                # fill the explorer instead of waiting for a cursor move.
+                key = (job.uid, len(job.formats)) if job is not None else None
+                if job is not None and job.analyzed and self._explorer_key != key:
+                    self.refresh_focused()
+                else:
+                    self.refresh_slots()
         except NoMatches:
             return  # the app is shutting down
 

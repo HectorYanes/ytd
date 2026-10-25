@@ -91,3 +91,9 @@ and has not asked for it.
   compatible streams, a "show incompatible" toggle, muxed choice clears the
   audio pair). `c` filters the explorer table the same way and the note column
   flags offenders. Tests: 46/46, including the modal at 80x24.
+- **L8** (bug found in a real run, not by the tests): the explorer of the
+  focused row stayed empty after analysis, because `refresh_focused` had
+  already recorded the row before its formats arrived and the message handler
+  only redrew the status cell. Fixed by keying the explorer on
+  `(uid, len(formats))`; regression test added. Real run now shows 43 visible
+  rows and a 12-line availability report for a 4K video.

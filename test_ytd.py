@@ -564,6 +564,27 @@ async def test_app_analyze_loads_formats():
         app_module.run_json = original
 
 
+async def test_app_analysis_fills_the_explorer_of_the_focused_row():
+    original = app_module.run_json
+
+    async def fake(url, *, flat=False, timeout=180):
+        return INFO, ""
+
+    app_module.run_json = fake
+    try:
+        app = YtdApp()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.add_url(URL)
+            assert await pump(pilot, lambda: app.jobs and app.jobs[0].analyzed)
+            await pilot.pause()
+            assert app.row_count() > 0
+            assert "2160p" in app.report_text
+            assert app.focused_job().selector() != ""
+    finally:
+        app_module.run_json = original
+
+
 async def test_app_analyze_failure_marks_error():
     original = app_module.run_json
 
