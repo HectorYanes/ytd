@@ -42,11 +42,12 @@ own row.
 | `Enter` in the URL field | queue the URL(s), space separated |
 | `v` | set the highlighted format row as the **video** part |
 | `a` | set the highlighted format row as the **audio** part |
-| `e` | analyze the focused row (formats are fetched lazily) |
+| `e` | analyze the focused row, or open the format editor once it is analyzed |
 | `d` | download the focused row |
 | `s` | download every pending row |
 | `x` | cancel the focused download |
 | `Delete` | remove the focused row |
+| `c` | show only formats the merge container accepts |
 | `r` | reset the choice back to the automatic pick |
 | `f` | jump to the filter box |
 | `l` | toggle the log pane |
@@ -66,6 +67,13 @@ which are HLS-only, and which are video-only.
 
 If you never pick, the row downloads with **no `-f` at all**, so your yt-dlp
 config's `--format "bv*+ba/b"` decides.
+
+`e` opens an editor with a video and an audio dropdown. It only lists streams
+the merge container can hold: with `--merge-output-format mp4`, VP9 video and
+Opus/Vorbis audio are hidden — muxing those into MP4 means a silent re-encode,
+which is exactly the trap `yt-dlp -F` hides from you. `c` applies the same rule
+to the explorer table, and any incompatible row is flagged in the `note`
+column.
 
 ## Interaction with your yt-dlp config
 

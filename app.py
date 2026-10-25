@@ -8,8 +8,9 @@ from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
+from textual.screen import ModalScreen
 from textual.message import Message
 from textual.widgets import (
     Checkbox,
@@ -30,7 +31,11 @@ from model import (
     Status,
     apply_filters,
     availability_report,
+    compatibility_note,
     default_selection,
+    human_bitrate,
+    human_size,
+    is_compatible,
     status_label,
 )
 
@@ -57,6 +62,130 @@ class JobChanged(Message):
         super().__init__()
 
 
+class JobEditor(ModalScreen[tuple[str | None, str | None] | None]):
+    """Pick the video and audio streams for one row, incompatible ones hidden."""
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+        Binding("enter", "apply", "Apply"),
+    ]
+    CSS = """
+JobEditor { align: center middle; }
+#editor { width: 76; height: auto; max-height: 90%; border: round $accent;
+          background: $surface; padding: 1 2; }
+#editor Select { width: 100%; }
+#editor Static { margin-top: 1; }
+"""
+
+    def __init__(self, job: Job, merge_format: str | None) -> None:
+        super().__init__()
+        self.job = job
+        self.merge_format = merge_format
+        self.show_incompatible = False
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="editor"):
+            yield Static(f"[bold]{self.job.label(60)}[/bold]")
+            yield Static(
+                f"container: {self.merge_format or 'yt-dlp default'}", id="merge"
+            )
+            yield Select([], prompt="video", allow_blank=True, id="video")
+            yield Select([], prompt="audio", allow_blank=True, id="audio")
+            yield Checkbox("show incompatible formats", False, id="show_bad")
+            yield Static("", id="note")
+            yield Static("[dim]Enter apply · Esc cancel[/dim]")
+
+    def on_mount(self) -> None:
+        self.rebuild()
+        self.query_one("#video", Select).focus()
+
+    # ------------------------------------------------------------- options
+    def option_label(self, fmt) -> str:
+        codec = fmt.vcodec_name or fmt.acodec_name or "?"
+        label = f"{fmt.resolution} · {codec} · {human_bitrate(fmt.tbr)} · {human_size(fmt.size)}"
+        note = compatibility_note(fmt, self.merge_format)
+        return f"{label}  ⚠ {note}" if note else label
+
+    def video_options(self) -> list[tuple[str, str]]:
+        return [
+            (self.option_label(fmt), fmt.id)
+            for fmt in self.job.formats
+            if fmt.available
+            and fmt.kind in ("video", "muxed")
+            and (self.show_incompatible or is_compatible(fmt, self.merge_format))
+        ]
+
+    def audio_options(self) -> list[tuple[str, str]]:
+        options = [("— none —", "")]
+        options += [
+            (self.option_label(fmt), fmt.id)
+            for fmt in self.job.formats
+            if fmt.available
+            and fmt.kind == "audio"
+            and (self.show_incompatible or is_compatible(fmt, self.merge_format))
+        ]
+        return options
+
+    def rebuild(self) -> None:
+        video = self.query_one("#video", Select)
+        audio = self.query_one("#audio", Select)
+        video_default = self.job.video_id
+        audio_default = self.job.audio_id or ""
+        for widget, options, default in (
+            (video, self.video_options(), video_default),
+            (audio, self.audio_options(), audio_default),
+        ):
+            widget.set_options(options)
+            values = [value for _, value in options]
+            if default in values:
+                widget.value = default
+            elif values:
+                widget.value = values[0]
+            else:
+                widget.value = Select.BLANK
+        self.update_note()
+
+    def update_note(self) -> None:
+        video = self.query_one("#video", Select)
+        audio = self.query_one("#audio", Select)
+        fmt = self.job.find(video.value if video.value is not Select.BLANK else None)
+        lines = []
+        if fmt is not None:
+            lines.append(f"video: {fmt.id} · {self.option_label(fmt)}")
+            if fmt.kind == "muxed":
+                lines.append("muxed stream — audio comes inside the video file")
+        afmt = self.job.find(audio.value if audio.value is not Select.BLANK else None)
+        if afmt is not None:
+            lines.append(f"audio: {afmt.id} · {self.option_label(afmt)}")
+        note = ""
+        for candidate in (fmt, afmt):
+            problem = compatibility_note(candidate, self.merge_format) if candidate else ""
+            if problem:
+                note = f"[yellow]⚠ {problem} — ffmpeg will re-encode[/yellow]"
+        lines.append(note or "[dim]compatible with the merge container[/dim]")
+        self.query_one("#note", Static).update("\n".join(lines))
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        self.update_note()
+
+    def on_checkbox_changed(self, event: Checkbox.Changed) -> None:
+        self.show_incompatible = event.value
+        self.rebuild()
+
+    def action_apply(self) -> None:
+        video = self.query_one("#video", Select).value
+        audio = self.query_one("#audio", Select).value
+        self.dismiss(
+            (
+                None if video is Select.BLANK else video,
+                None if audio in (Select.BLANK, "") else audio,
+            )
+        )
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class YtdApp(App):
     TITLE = "ytd — yt-dlp queue"
     CSS = """
@@ -81,6 +210,7 @@ Screen { layout: vertical; }
         Binding("s", "start_all", "Start all", show=True),
         Binding("x", "cancel_job", "Cancel", show=True),
         Binding("delete", "delete_job", "Remove", show=True),
+        Binding("c", "toggle_compat", "Compat", show=True),
         Binding("r", "reset_choice", "Reset", show=True),
         Binding("f", "focus_filter", "Filter", show=True),
         Binding("l", "toggle_log", "Log", show=True),
@@ -95,6 +225,7 @@ Screen { layout: vertical; }
         max_concurrent: int = 1,
         spawn=None,
         seed: list[tuple[str, dict]] | None = None,
+        merge_format: str | None = None,
     ) -> None:
         super().__init__()
         from pathlib import Path
@@ -107,7 +238,8 @@ Screen { layout: vertical; }
         self.jobs: list[Job] = []
         self.focused_uid: int | None = None
         self.manager: DownloadManager | None = None
-        self.merge_format = detect_merge_format()
+        self.merge_format = merge_format or detect_merge_format()
+        self.compatible_only = False
         self.log_lines: list[str] = []
         self.report_text = ""
         self._next_uid = 1
@@ -363,6 +495,10 @@ Screen { layout: vertical; }
         self._visible = (
             apply_filters(job.formats, **self.current_filters()) if job else []
         )
+        if job and self.compatible_only:
+            self._visible = [
+                fmt for fmt in self._visible if is_compatible(fmt, self.merge_format)
+            ]
         table = self.formats_table()
         cursor = table.cursor_row
         table.clear()
@@ -381,7 +517,9 @@ Screen { layout: vertical; }
         note = fmt.note or ""
         if fmt.language:
             note = f"{note} [{fmt.language}]".strip()
-        from model import human_bitrate, human_size
+        problem = compatibility_note(fmt, self.merge_format)
+        if problem:
+            note = f"{note} ⚠ {problem}".strip()
 
         return [
             Text(mark, style="bold yellow"),
@@ -412,6 +550,8 @@ Screen { layout: vertical; }
             )
             if job.video() is not None and job.video().kind == "video" and not job.audio_id:
                 text += "  [yellow]⚠ no audio selected[/yellow]"
+            if self.compatible_only:
+                text += f"  [cyan]· only {self.merge_format}-compatible[/cyan]"
         try:
             self.query_one("#slots", Static).update(text)
         except Exception:
@@ -521,10 +661,33 @@ Screen { layout: vertical; }
         job = self.focused_job()
         if job is None:
             return
-        if job.analyzed:
-            self.notify(f"{len(job.formats)} formats already loaded — pick with v/a.")
+        if not job.analyzed:
+            self.analyze_job(job)
+            self.notify("Analyzing… press e again to edit this row.")
             return
-        self.analyze_job(job)
+        self.push_screen(
+            JobEditor(job, self.merge_format),
+            lambda result: self.apply_editor(job, result),
+        )
+
+    def apply_editor(self, job: Job, result) -> None:
+        if result is None:
+            return
+        video_id, audio_id = result
+        job.video_id = video_id or None
+        job.audio_id = audio_id or None
+        video = job.video()
+        if video is not None and video.kind == "muxed":
+            job.audio_id = None
+        self._choice_changed(job)
+
+    def action_toggle_compat(self) -> None:
+        self.compatible_only = not self.compatible_only
+        self.refresh_formats()
+        self.refresh_slots()
+        self.notify(
+            f"Showing {'only ' + str(self.merge_format or 'compatible') + '-compatible' if self.compatible_only else 'all'} formats."
+        )
 
     # --------------------------------------------------------------- download
     def action_download(self) -> None:

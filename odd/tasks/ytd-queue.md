@@ -45,7 +45,7 @@ and has not asked for it.
 | T2 | S1, S4, S8 | inline | done | this slice |
 | T3 | S6, S9 (dedupe), S2/S3 lazy | inline | done | this slice |
 | T4 | S7 | inline | done — pool + `-j` flag + concurrency test | this slice |
-| T5 | S2/S3 editor, S5 | inline | pending | — |
+| T5 | S2/S3 editor, S5 | inline | done | this slice |
 
 ## Log
 
@@ -84,3 +84,10 @@ and has not asked for it.
   `private`/`premium_only`/`subscriber_only` entries `error: unavailable (…)`,
   drops `None` entries, keeps the position, and skips URLs already queued.
   Tests: 41/41.
+- **L7** (T5, S2/S3/S5): `is_compatible` / `compatibility_note` encode the
+  merge-container rules verified earlier (mp4 takes h264/h265/av1 + aac/mp3/
+  ac3/eac3, not vp9/opus/vorbis; webm takes vp8/vp9/av1 + opus/vorbis; mkv
+  takes anything). `e` opens `JobEditor` (video/audio `Select`s listing only
+  compatible streams, a "show incompatible" toggle, muxed choice clears the
+  audio pair). `c` filters the explorer table the same way and the note column
+  flags offenders. Tests: 46/46, including the modal at 80x24.

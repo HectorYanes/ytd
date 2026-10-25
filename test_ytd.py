@@ -18,8 +18,11 @@ from core import (
     parse_progress,
 )
 from model import (
+    Fmt,
     Job,
     Status,
+    compatibility_note,
+    is_compatible,
     apply_filters,
     availability_report,
     build_format_selector,
@@ -369,6 +372,21 @@ def test_decode_json_rejects_null_payload():
     assert decode_json('{"_type": "video"}', "", 0) == {"_type": "video"}
 
 
+def test_is_compatible_matrix():
+    video = lambda codec: Fmt(id="v", ext="mp4", vcodec=codec, acodec=None, kind="video")
+    audio = lambda codec: Fmt(id="a", ext="m4a", vcodec=None, acodec=codec, kind="audio")
+    assert is_compatible(video("avc1.64002A"), "mp4") is True
+    assert is_compatible(video("vp09.00.10.08"), "mp4") is False
+    assert is_compatible(video("av01.0.13M.0"), "mp4") is True
+    assert is_compatible(audio("mp4a.40.2"), "mp4") is True
+    assert is_compatible(audio("opus"), "mp4") is False
+    assert is_compatible(audio("opus"), "webm") is True
+    assert is_compatible(video("vp09.00.10.08"), "mkv") is True
+    assert is_compatible(Fmt(id="m", ext="mp4", vcodec="vp9", acodec="opus", kind="muxed"), "mp4") is True
+    assert compatibility_note(audio("opus"), "mp4") == "opus not compatible with mp4"
+    assert compatibility_note(audio("mp4a.40.2"), "mp4") == ""
+
+
 def test_download_command_omits_format_when_auto():
     job = Job(uid=1, url=URL)
     cmd = download_command(job, "/tmp/out", binary="yt-dlp")
@@ -645,17 +663,86 @@ async def test_app_download_updates_row_status():
         assert str(app.queue().get_cell(str(job.uid), "status")) == "completado"
 
 
+async def test_app_compat_toggle_hides_incompatible_formats():
+    app = YtdApp(seed=[(URL, INFO)], merge_format="mp4")
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app.visible_ids() == ["140", "251", "18", "299", "303", "401", "301"]
+        app.action_toggle_compat()
+        await pilot.pause()
+        assert app.visible_ids() == ["140", "18", "299", "401", "301"]
+        assert app.compatible_only is True
+        app.action_toggle_compat()
+        await pilot.pause()
+        assert app.row_count() == 7
+
+
+async def test_app_format_note_flags_incompatible_container():
+    app = YtdApp(seed=[(URL, INFO)], merge_format="mp4")
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        note_opus = str(app.formats_table().get_cell("251", "note"))
+        note_aac = str(app.formats_table().get_cell("140", "note"))
+        assert "not compatible" in note_opus
+        assert "not compatible" not in note_aac
+
+
+async def test_app_editor_opens_with_compatible_options_only():
+    app = YtdApp(seed=[(URL, INFO)], merge_format="mp4")
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app.action_edit_job()
+        await pilot.pause()
+        editor = app.screen
+        assert isinstance(editor, app_module.JobEditor)
+        assert editor.size.width <= 80 and editor.size.height <= 24
+        video_values = [value for _, value in editor.video_options()]
+        audio_values = [value for _, value in editor.audio_options()]
+        assert "299" in video_values
+        assert "303" not in video_values  # vp9 in mp4
+        assert "140" in audio_values
+        assert "251" not in audio_values  # opus in mp4
+        editor.show_incompatible = True
+        editor.rebuild()
+        assert "303" in [value for _, value in editor.video_options()]
+        editor.dismiss(("299", "140"))
+        await pilot.pause()
+        assert app.jobs[0].selector() == "299+140"
+        assert app.focused_job() is app.jobs[0]
+
+
+async def test_app_editor_muxed_choice_clears_audio():
+    app = YtdApp(seed=[(URL, INFO)], merge_format="mp4")
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        job = app.jobs[0]
+        app.apply_editor(job, ("18", "140"))
+        await pilot.pause()
+        assert job.selector() == "18"
+        assert job.audio_id is None
+        app.apply_editor(job, None)  # cancelled editor changes nothing
+        assert job.selector() == "18"
+
+
 async def test_app_key_bindings_do_not_crash():
     hold = asyncio.Event()
-    app = YtdApp(seed=[(URL, INFO)], spawn=spawner(lambda: FakeProc(hold=hold)))
+    app = YtdApp(
+        seed=[(URL, INFO)], spawn=spawner(lambda: FakeProc(hold=hold)), merge_format="mp4"
+    )
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
-        for key in ("down", "up", "tab", "v", "a", "r", "e", "f", "l", "l", "enter"):
+        app.queue().focus()
+        for key in ("down", "up", "v", "a", "r", "c", "c", "l", "l"):
             await pilot.press(key)
             await pilot.pause()
+        await pilot.press("e")
+        await pilot.pause()
+        assert isinstance(app.screen, app_module.JobEditor)
+        await pilot.press("escape")
+        await pilot.pause()
+        assert app.screen is app.screen_stack[0]
         app.action_start_all()
         await pilot.pause()
-        app.queue().focus()
         await pilot.press("x")
         await pilot.pause()
         await pilot.press("delete")

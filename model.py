@@ -217,6 +217,43 @@ def apply_filters(
     return out
 
 
+VIDEO_CODECS_BY_CONTAINER: dict[str, set[str]] = {
+    "mp4": {"h264", "h265", "av1", "mpeg4"},
+    "webm": {"vp8", "vp9", "av1"},
+}
+AUDIO_CODECS_BY_CONTAINER: dict[str, set[str]] = {
+    "mp4": {"aac", "mp3", "ac3", "eac3", "alac"},
+    "m4a": {"aac", "mp3", "alac"},
+    "webm": {"opus", "vorbis"},
+}
+
+
+def container_family(merge_format: str | None) -> str:
+    name = (merge_format or "").strip().lower().lstrip(".")
+    return {"mov": "mp4", "matroska": "mkv"}.get(name, name)
+
+
+def is_compatible(fmt: Fmt, merge_format: str | None) -> bool:
+    """Can this stream be muxed into the configured container without re-encoding?"""
+    if fmt.kind not in ("video", "audio") or not merge_format:
+        return True
+    family = container_family(merge_format)
+    if family in ("", "mkv"):
+        return True
+    if fmt.kind == "video":
+        allowed = VIDEO_CODECS_BY_CONTAINER.get(family, VIDEO_CODECS_BY_CONTAINER["mp4"])
+        return fmt.vcodec_name is None or fmt.vcodec_name in allowed
+    allowed = AUDIO_CODECS_BY_CONTAINER.get(family, AUDIO_CODECS_BY_CONTAINER["mp4"])
+    return fmt.acodec_name is None or fmt.acodec_name in allowed
+
+
+def compatibility_note(fmt: Fmt, merge_format: str | None) -> str:
+    if is_compatible(fmt, merge_format):
+        return ""
+    codec = (fmt.acodec_name if fmt.kind == "audio" else fmt.vcodec_name) or "?"
+    return f"{codec} not compatible with {container_family(merge_format)}"
+
+
 def availability_report(fmts: list[Fmt], merge_format: str | None = None) -> list[str]:
     """Human summary of what is actually downloadable, grouped by height."""
     lines: list[str] = []
