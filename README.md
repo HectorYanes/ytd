@@ -5,19 +5,48 @@ download, the audio that goes with it, and a live status. The format table
 below is for the focused row only, so you see 8 filters and one video instead
 of `yt-dlp -F`'s wall of 47 rows.
 
+Runs on Linux, macOS and Windows with the same keys and the same queue.
+
 ## Install
 
-```bash
-# already installed at ~/.local/bin/ytd (symlink into ~/tools/ytd/ytd.py)
-ln -sf ~/tools/ytd/ytd.py ~/.local/bin/ytd
+You need [uv](https://docs.astral.sh/uv/) and — for merging video+audio and
+embedding metadata — `ffmpeg`. Everything Python-side (yt-dlp, the JavaScript
+runtime YouTube requires, Textual) is installed for you.
 
-ytd                                  # empty queue, paste URLs
+| system | install the prerequisites | then |
+| --- | --- | --- |
+| Windows (PowerShell) | `winget install --id astral-sh.uv -e`<br>`winget install --id Gyan.FFmpeg -e` | `uv tool install ytd_tui-0.2.0-py3-none-any.whl` |
+| macOS | `brew install uv ffmpeg` | `uv tool install ytd_tui-0.2.0-py3-none-any.whl` |
+| Linux | `curl -LsSf https://astral.sh/uv/install.sh \| sh` and install `ffmpeg` | `uv tool install ytd_tui-0.2.0-py3-none-any.whl` |
+
+Open a fresh terminal after installing `uv`/`ffmpeg` so `PATH` picks them up.
+From inside the source folder, `uv tool install .` does the same as the wheel.
+
+```bash
+ytd                                   # empty queue, paste URLs
 ytd 'https://youtu.be/…' 'https://…'  # queue them on start
-ytd -o ~/Videos -j 4 'URL'           # custom dir, 4 downloads at once
+ytd -o ~/Videos -j 4 'URL'            # custom dir, 4 downloads at once
+ytd --check                           # diagnose yt-dlp / ffmpeg / config
 ```
 
-Requires `yt-dlp` and `ffmpeg` in `PATH`. The script is a PEP 723 uv script:
-`uv run` provisions Textual on first launch, nothing global.
+`pipx install .` works too. `ytd` gets its own environment, so it never
+touches your system Python.
+
+### Without installing anything
+
+The folder also runs in place, provisioning its dependencies on first launch
+(cached afterwards):
+
+```powershell
+.\ytd.cmd              # Windows
+```
+
+```bash
+uv run ytd.py          # Linux / macOS
+```
+
+This path is slower to start the very first time and leaves the console
+attached; installing as a tool is the better experience.
 
 ## The queue
 
@@ -77,13 +106,77 @@ column.
 
 ## Interaction with your yt-dlp config
 
-`~/.config/yt-dlp/config` is still loaded (cookies, output template, merge
-container, embedding). `ytd` only overrides two things:
+Your config is still loaded (cookies, output template, merge container,
+embedding). `ytd` only overrides two things:
 
 - `-f` — your selection wins over `--format` in the config, and only when you
   selected something.
 - `-P home:<dir>` — the output directory, verified to override a `--paths`
   entry from the config.
+
+Where the config lives, per platform:
+
+| system | paths checked, first hit wins |
+| --- | --- |
+| Windows | `%APPDATA%\yt-dlp\config`, `config.txt`, `%USERPROFILE%\yt-dlp.conf` |
+| macOS | `~/Library/Application Support/yt-dlp/config`, `config.txt`, `~/yt-dlp.conf` |
+| Linux | `$XDG_CONFIG_HOME/yt-dlp/config`, `config.txt`, `~/yt-dlp.conf`, `/etc/yt-dlp.conf` |
+
+`ytd --check` prints the one it actually found.
+
+## Which yt-dlp runs
+
+Most specific first:
+
+1. `YTD_YTDLP` — an explicit path you set.
+2. `yt-dlp` on your `PATH` — your own install, with its own extras.
+3. The copy bundled with this package (`python -m yt_dlp`), used when there is
+   no system yt-dlp. This is the normal case on Windows after
+   `uv tool install`.
+
+The bundled copy also brings a **JavaScript runtime** (deno). YouTube returns no
+formats at all without one — not even `-f 18` — so it is a hard dependency, and
+`--check` reports where it was found. If you prefer your own, any of
+`deno`, `node`, `bun` on `PATH` is used, and `YTD_YTDLP` points at a specific
+yt-dlp binary.
+
+`ffmpeg` is not bundled. Without it, muxed downloads such as `-f 18` still
+work, but merging separate video+audio and embedding metadata/thumbnails fail;
+`ytd --check` says so and the UI warns at startup.
+
+## Troubleshooting
+
+Start with:
+
+```bash
+ytd --check
+```
+
+```
+ytd        0.2.0
+python     3.14.0
+platform   Linux 7.1.8-1-cachyos (x86_64)
+yt-dlp     bundled module (/…/bin/python -m yt_dlp)
+yt-dlp ver 2026.10.21
+ffmpeg     /usr/bin/ffmpeg
+js runtime /…/bin/deno
+config     /home/…/.config/yt-dlp/config
+container  mp4
+outdir     /home/…/Downloads
+```
+
+It exits `1` when yt-dlp or ffmpeg is missing.
+
+- **YouTube rows fail with "Requested format is not available".** No JavaScript
+  runtime. Install deno/node, or install this package with its default
+  dependencies.
+- **"ffmpeg is not installed" on merge.** Install ffmpeg and reopen the
+  terminal; on Windows `winget install Gyan.FFmpeg` then a new window.
+- **Cookies fail on Linux** (`cannot decrypt v11 cookies`). The cookie backend
+  needs `secretstorage`; the package installs it on Linux automatically. A
+  hand-rolled `pip install yt-dlp` without extras does not.
+- **Text looks wrong on Windows.** Use Windows Terminal; the legacy console
+  host works but renders the box drawing poorly.
 
 ## Implementation notes
 
@@ -94,7 +187,9 @@ container, embedding). `ytd` only overrides two things:
   interpreter via `/usr/bin/env python3`. Inside a `uv run` script, PATH points
   at uv's managed CPython, which has no `secretstorage`, so
   `--cookies-from-browser …+gnomekeyring` dies with "cannot decrypt v11
-  cookies". `child_env()` prunes the uv entries from the child PATH.
+  cookies". `child_env()` prunes the uv entries from the child PATH, and adds
+  our own `bin`/`Scripts` directory only when the bundled module runs, so the
+  bundled deno is visible.
 - **A non-zero exit can still carry usable JSON.** yt-dlp exits 1 when a cookie
   backend warns while still emitting complete metadata, so the payload wins
   over the exit code — but a literal `null` payload is an error, not a video.
@@ -110,7 +205,8 @@ uv run --with textual python test_ytd.py     # no pytest needed
 ```
 
 Covers codec mapping, format classification, size fallbacks, every filter,
-the availability report, progress parsing, the child environment, the queue
-model, the download pool (progress, errors, cancel, concurrency cap, dedupe),
-the JSON guard, and the TUI itself (rows, filtering, selection, status cells,
-key bindings, and an 80x24 layout regression).
+the availability report, progress parsing, the child environment (POSIX and
+Windows path syntax), config discovery per OS, yt-dlp resolution order, the
+`--check` report, the queue model, the download pool (progress, errors, cancel,
+concurrency cap, dedupe), the JSON guard, and the TUI itself (rows, filtering,
+selection, status cells, key bindings, and an 80x24 layout regression).
