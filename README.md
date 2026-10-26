@@ -19,6 +19,28 @@ runtime YouTube requires, Textual) is installed for you.
 | macOS | `brew install uv ffmpeg` | `uv tool install ytd_tui-0.2.0-py3-none-any.whl` |
 | Linux | `curl -LsSf https://astral.sh/uv/install.sh \| sh` and install `ffmpeg` | `uv tool install ytd_tui-0.2.0-py3-none-any.whl` |
 
+### One command instead of those steps
+
+`install.sh` (Linux/macOS) and `install.ps1` (Windows) do exactly the table
+above: install `uv` and `ffmpeg` when they are missing, install this folder's
+wheel as a tool, then run `ytd --check`.
+
+```bash
+./install.sh
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+`install.ps1` also takes `-SkipFfmpeg` and `-SkipCheck`. If a `ytd` you put in
+the tool directory by hand already exists, both scripts stop instead of
+overwriting it (`YTD_ALLOW_OVERWRITE=1` / `$env:YTD_ALLOW_OVERWRITE=1` to
+proceed).
+
+A full install is about **150 MB** (92 MB of it is the deno runtime YouTube
+needs; the Python side is ~55 MB). `ffmpeg` is a separate system package.
+
 Open a fresh terminal after installing `uv`/`ffmpeg` so `PATH` picks them up.
 From inside the source folder, `uv tool install .` does the same as the wheel.
 

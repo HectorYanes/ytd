@@ -31,6 +31,7 @@ requested and would still need ffmpeg.
 | T2 | S1, S3 | inline | done — yt-dlp resolution (env/PATH/bundled module), bundled deno, UTF-8 child I/O, cross-platform `child_env` | this slice |
 | T3 | S3 | inline | done — config discovery per OS, ffmpeg + JS runtime probes, `ytd --check` | this slice |
 | T4 | S2, S4 | inline | done — README per OS, LICENSE, real-run evidence | docs slice |
+| T5 | S2 | inline | done — `install.sh` / `install.ps1` (uv + ffmpeg + tool + `--check`), conflict guard, tested on Linux; PowerShell untested locally | installers slice |
 
 ## Log
 
@@ -67,3 +68,14 @@ requested and would still need ffmpeg.
   testing was not possible; Windows behavior is covered by pure-function tests
   (`_prune_path`, `config_candidates`, `child_env`) plus the platform-agnostic
   bundle path proven above.
+- **L7** (installers): `install.sh` tested in three modes: normal (wrapped
+  wheel installed, `--check` clean, exit 0), foreign `ytd` in the tool bin dir
+  (refuses with exit 1 and the exact `rm` command), and
+  `YTD_ALLOW_OVERWRITE=1` (uv replaces the symlink with its own and the entry
+  point answers `--version`). `install.ps1` could not be executed here: there
+  is no PowerShell on this machine, so it is reviewed but untested — the first
+  real Windows run is the pending proof.
+- **L8** (size): installed footprint measured at 148 MB — `bin/deno` 92 MB and
+  `lib/.../site-packages` 55 MB (yt-dlp 12, cryptography 15, Cryptodome 6.8,
+  pygments 5, brotli 5, textual 3.3). The uv wheel cache and the uv-managed
+  CPython are shared outside the tool directory.
