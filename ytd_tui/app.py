@@ -23,8 +23,17 @@ from textual.widgets import (
     Static,
 )
 
-from core import DownloadManager, YtdlpError, detect_merge_format, run_json
-from model import (
+from .core import (
+    DownloadManager,
+    YtdlpError,
+    detect_merge_format,
+    ffmpeg_path,
+    js_runtime,
+    module_bin_dirs,
+    run_json,
+    ytdlp_origin,
+)
+from .model import (
     KIND_STYLE,
     STATUS_STYLE,
     Job,
@@ -240,6 +249,9 @@ Screen { layout: vertical; }
         self.manager: DownloadManager | None = None
         self.merge_format = merge_format or detect_merge_format()
         self.compatible_only = False
+        self.ffmpeg = ffmpeg_path()
+        self.ytdlp = ytdlp_origin()
+        self.js_runtime = js_runtime(module_bin_dirs())
         self.log_lines: list[str] = []
         self.report_text = ""
         self._next_uid = 1
@@ -301,6 +313,23 @@ Screen { layout: vertical; }
         for url in self.start_urls:
             self.add_url(url)
         self.refresh_focused()
+        self.write_log(f"[dim]yt-dlp: {self.ytdlp}[/dim]")
+        if self.ffmpeg:
+            self.write_log(f"[dim]ffmpeg: {self.ffmpeg}[/dim]")
+        else:
+            message = (
+                "ffmpeg is not installed: merging separate video+audio streams "
+                "and embedding metadata/thumbnails will fail."
+            )
+            self.write_log(f"[yellow]{message}[/yellow]")
+            self.notify(message, severity="warning", timeout=8)
+        if not self.js_runtime:
+            message = (
+                "No JavaScript runtime found: YouTube will not list formats. "
+                "Install deno or node, or `pip install yt-dlp[deno]`."
+            )
+            self.write_log(f"[yellow]{message}[/yellow]")
+            self.notify(message, severity="warning", timeout=8)
         self.query_one("#urlbar", Input).focus()
 
     # ------------------------------------------------------------- utilities
@@ -400,7 +429,7 @@ Screen { layout: vertical; }
         if info.get("_type") == "playlist":
             self.expand_playlist(job, info)
             return
-        from model import parse_formats
+        from .model import parse_formats
 
         job.title = info.get("title") or info.get("id") or job.url
         job.uploader = info.get("uploader") or ""

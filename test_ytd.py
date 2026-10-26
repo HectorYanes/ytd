@@ -5,19 +5,34 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import io
+import os
 import sys
+import tempfile
 import traceback
+from pathlib import Path
 
-import app as app_module
-from core import (
+import ytd_tui.app as app_module
+import ytd_tui.cli as cli_module
+import ytd_tui.core as core_module
+from ytd_tui.core import (
     DownloadManager,
     YtdlpError,
-    decode_json,
+    _prune_path,
+    analyze_command,
     child_env,
+    config_candidates,
+    decode_json,
+    js_runtime,
+    module_bin_dirs,
+    detect_merge_format,
+    parse_merge_format,
+    ytdlp_origin,
+    ytdlp_prefix,
     download_command,
     parse_progress,
 )
-from model import (
+from ytd_tui.model import (
     Fmt,
     Job,
     Status,
@@ -32,7 +47,7 @@ from model import (
     parse_formats,
     status_label,
 )
-from ytd import YtdApp
+from ytd_tui.app import YtdApp
 
 # Fixture shaped after real `yt-dlp -J` output (Big Buck Bunny 4K probe).
 INFO = {
@@ -196,18 +211,175 @@ def test_availability_report_lists_audio():
     assert "aac" in text and "opus" in text
 
 
+def test_prune_path_handles_posix_and_windows_syntax():
+    assert _prune_path(
+        "/venv/bin:/home/u/.local/share/uv/python/bin:/usr/bin:/bin", ":", "/venv"
+    ) == "/usr/bin:/bin"
+    assert _prune_path(
+        r"C:\Users\me\AppData\Roaming\uv\python\cpython-3.12\Scripts;C:\Windows;C:\ffmpeg\bin", ";"
+    ) == r"C:\Windows;C:\ffmpeg\bin"
+    assert _prune_path(
+        r"D:\venv\Scripts;C:\Windows", ";", r"D:\venv"
+    ) == r"C:\Windows"
+
+
 def test_child_env_drops_uv_interpreter():
+    sep = os.pathsep
     fake = {
-        "PATH": "/venv/bin:/home/u/.cache/uv/archive-v0/x/bin:/home/u/.local/share/uv/python/bin:/usr/bin:/bin",
+        "PATH": sep.join(
+            [
+                "/home/u/.local/share/uv/python/bin",
+                "/home/u/.local/share/uv/tools/x/bin",
+                "/usr/bin",
+                "/bin",
+            ]
+        ),
         "VIRTUAL_ENV": "/venv",
         "PYTHONPATH": "/venv/lib",
         "HOME": "/home/u",
     }
     env = child_env(fake)
-    assert env["PATH"] == "/usr/bin:/bin"
+    assert env["PATH"] == sep.join(["/usr/bin", "/bin"])
     assert "VIRTUAL_ENV" not in env
     assert "PYTHONPATH" not in env
     assert env["HOME"] == "/home/u"
+    assert env["PYTHONUTF8"] == "1"
+    assert env["PYTHONIOENCODING"] == "utf-8"
+
+
+def test_config_candidates_per_platform():
+    home = Path("/home/u")
+    win = config_candidates("Windows", home, {"APPDATA": "/appdata"})
+    assert str(win[0]).replace("\\", "/") == "/appdata/yt-dlp/config"
+    assert str(win[1]).replace("\\", "/") == "/appdata/yt-dlp/config.txt"
+    mac = config_candidates("Darwin", home, {})
+    assert "Library/Application Support/yt-dlp/config" in str(mac[0]).replace("\\", "/")
+    linux = config_candidates("Linux", home, {"XDG_CONFIG_HOME": "/cfg"})
+    assert str(linux[0]) == "/cfg/yt-dlp/config"
+    assert str(linux[1]) == "/cfg/yt-dlp/config.txt"
+
+
+def test_parse_merge_format_variants():
+    assert parse_merge_format("--merge-output-format mp4") == "mp4"
+    assert parse_merge_format("--merge-output-format=MKV\n") == "mkv"
+    assert parse_merge_format("--remux-video webm") == "webm"
+    assert parse_merge_format("-f bv*+ba/b\n") is None
+
+
+def test_detect_merge_format_reads_xdg_config():
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg = Path(tmp) / "yt-dlp" / "config"
+        cfg.parent.mkdir(parents=True)
+        cfg.write_text('--paths home:~/Downloads\n--merge-output-format mkv\n')
+        got = detect_merge_format("Linux", Path(tmp), {"XDG_CONFIG_HOME": tmp})
+        assert got == "mkv"
+        assert detect_merge_format("Linux", Path(tmp), {"XDG_CONFIG_HOME": tmp + "/nope"}) is None
+
+
+def test_ytdlp_prefix_resolution_order():
+    original = (
+        core_module.shutil.which,
+        core_module.importlib.util.find_spec,
+        os.environ.get("YTD_YTDLP"),
+    )
+    try:
+        os.environ["YTD_YTDLP"] = "/opt/custom/yt-dlp"
+        assert ytdlp_prefix() == ["/opt/custom/yt-dlp"]
+        assert "YTD_YTDLP" in ytdlp_origin()
+
+        os.environ.pop("YTD_YTDLP")
+        core_module.shutil.which = lambda name: "/usr/bin/yt-dlp"
+        assert ytdlp_prefix() == ["/usr/bin/yt-dlp"]
+        assert "/usr/bin/yt-dlp" in ytdlp_origin()
+
+        core_module.shutil.which = lambda name: None
+        core_module.importlib.util.find_spec = lambda name: object()
+        assert ytdlp_prefix() == [sys.executable, "-m", "yt_dlp"]
+        assert ytdlp_origin().startswith("bundled module")
+
+        core_module.importlib.util.find_spec = lambda name: None
+        try:
+            ytdlp_prefix()
+        except YtdlpError as exc:
+            assert "not found" in str(exc)
+        else:
+            raise AssertionError("expected YtdlpError")
+        assert ytdlp_origin() == "missing"
+    finally:
+        core_module.shutil.which, core_module.importlib.util.find_spec, override = original
+        if override is None:
+            os.environ.pop("YTD_YTDLP", None)
+        else:
+            os.environ["YTD_YTDLP"] = override
+
+
+def test_module_bin_dirs_only_for_the_bundled_module():
+    assert module_bin_dirs(["yt-dlp"]) == []
+    assert module_bin_dirs(["/usr/bin/yt-dlp"]) == []
+    dirs = module_bin_dirs([sys.executable, "-m", "yt_dlp"])
+    assert len(dirs) == 1 and Path(dirs[0]).is_dir()
+
+
+def test_js_runtime_finds_a_binary_on_the_injected_path():
+    original = core_module.shutil.which
+    original_path = os.environ.get("PATH", "")
+    core_module.shutil.which = lambda name: None
+    try:
+        os.environ["PATH"] = ""
+        assert js_runtime([]) is None
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = Path(tmp) / ("deno.exe" if os.name == "nt" else "deno")
+            fake.write_text("#!/bin/sh\n")
+            fake.chmod(0o755)
+            assert js_runtime([tmp]) == str(fake)
+    finally:
+        core_module.shutil.which = original
+        os.environ["PATH"] = original_path
+
+
+def test_commands_use_the_resolved_prefix():
+    cmd = analyze_command("URL", flat=True, prefix=["yt-dlp"])
+    assert cmd[:2] == ["yt-dlp", "-J"]
+    assert "--flat-playlist" in cmd and cmd[-1] == "URL"
+
+
+def test_cli_check_reports_environment():
+    original = (
+        cli_module.ffmpeg_path,
+        cli_module.ytdlp_origin,
+        cli_module.config_path,
+        cli_module.detect_merge_format,
+        cli_module.ytdlp_version,
+    )
+    cli_module.ffmpeg_path = lambda: None
+    cli_module.ytdlp_origin = lambda: "PATH (/usr/bin/yt-dlp)"
+    cli_module.config_path = lambda: None
+    cli_module.detect_merge_format = lambda: None
+    cli_module.ytdlp_version = lambda: "2026.01.01"
+    buffer = io.StringIO()
+    stdout = sys.stdout
+    try:
+        sys.stdout = buffer
+        code = cli_module.run_check()
+    finally:
+        sys.stdout = stdout
+        (
+            cli_module.ffmpeg_path,
+            cli_module.ytdlp_origin,
+            cli_module.config_path,
+            cli_module.detect_merge_format,
+            cli_module.ytdlp_version,
+        ) = original
+    out = buffer.getvalue()
+    assert code == 1
+    assert "MISSING" in out and "2026.01.01" in out and "none found" in out
+
+
+def test_cli_parser_defaults():
+    args = cli_module.build_parser().parse_args([])
+    assert args.urls == [] and args.jobs == 3 and args.outdir is None
+    args = cli_module.build_parser().parse_args(["-j", "5", "-o", "/x", "u1", "u2"])
+    assert args.jobs == 5 and args.urls == ["u1", "u2"]
 
 
 URL = INFO["webpage_url"]
@@ -265,7 +437,7 @@ class FakeProc:
 
 
 def spawner(proc_factory, seen=None):
-    async def spawn(cmd):
+    async def spawn(cmd, env=None):
         if seen is not None:
             seen.append(cmd)
         return proc_factory()
@@ -389,13 +561,13 @@ def test_is_compatible_matrix():
 
 def test_download_command_omits_format_when_auto():
     job = Job(uid=1, url=URL)
-    cmd = download_command(job, "/tmp/out", binary="yt-dlp")
+    cmd = download_command(job, "/tmp/out", prefix=["yt-dlp"])
     assert cmd[:1] == ["yt-dlp"]
     assert "-f" not in cmd
     assert cmd[1:3] == ["-P", "home:/tmp/out"]
     assert cmd[-1] == URL
     job.video_id, job.audio_id = "299", "140"
-    cmd = download_command(job, "/tmp/out", binary="yt-dlp")
+    cmd = download_command(job, "/tmp/out", prefix=["yt-dlp"])
     assert cmd[1:3] == ["-f", "299+140"]
 
 
@@ -562,6 +734,39 @@ async def test_app_analyze_loads_formats():
             assert app.row_count() > 0
     finally:
         app_module.run_json = original
+
+
+async def test_app_warns_when_no_js_runtime():
+    original = app_module.js_runtime
+    app_module.js_runtime = lambda extra_path=None: None
+    try:
+        app = YtdApp(seed=[(URL, INFO)], merge_format="mp4")
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            assert app.js_runtime is None
+            assert any("JavaScript runtime" in line for line in app.log_lines)
+    finally:
+        app_module.js_runtime = original
+
+
+async def test_app_warns_when_ffmpeg_is_missing():
+    original = app_module.ffmpeg_path
+    app_module.ffmpeg_path = lambda: None
+    try:
+        app = YtdApp(seed=[(URL, INFO)], merge_format="mp4")
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            assert app.ffmpeg is None
+            assert any("ffmpeg is not installed" in line for line in app.log_lines)
+    finally:
+        app_module.ffmpeg_path = original
+
+
+async def test_app_logs_which_ytdlp_it_uses():
+    app = YtdApp(seed=[(URL, INFO)], merge_format="mp4")
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert any(line.startswith("yt-dlp: ") for line in app.log_lines)
 
 
 async def test_app_analysis_fills_the_explorer_of_the_focused_row():

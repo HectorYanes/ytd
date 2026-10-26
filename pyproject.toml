@@ -1,0 +1,36 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ytd-tui"
+dynamic = ["version"]
+description = "Queue TUI for yt-dlp: quality, audio and live status per link"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+keywords = ["yt-dlp", "tui", "textual", "download", "youtube"]
+classifiers = [
+  "Environment :: Console :: Curses",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Topic :: Multimedia :: Video",
+]
+dependencies = [
+  "textual>=1.0",
+  # deno ships as a wheel: YouTube refuses to expose formats without a JS
+  # runtime, so bundling it is what makes a fresh Windows install work.
+  "yt-dlp[default,deno]>=2024.1.1",
+  # keyring access for --cookies-from-browser on Linux; Windows/macOS use
+  # DPAPI / Keychain through pycryptodomex, already in the default extra.
+  "yt-dlp[secretstorage]>=2024.1.1; sys_platform == 'linux'",
+]
+
+[project.scripts]
+ytd = "ytd_tui.cli:main"
+
+[tool.hatch.version]
+path = "ytd_tui/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["ytd_tui"]
