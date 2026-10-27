@@ -47,6 +47,7 @@ from .model import (
     is_compatible,
     status_label,
 )
+from .store import QueueStore
 
 QUEUE_COLUMNS = (
     ("#", "num"),
@@ -235,6 +236,7 @@ Screen { layout: vertical; }
         spawn=None,
         seed: list[tuple[str, dict]] | None = None,
         merge_format: str | None = None,
+        store: QueueStore | None = None,
     ) -> None:
         super().__init__()
         from pathlib import Path
@@ -257,6 +259,8 @@ Screen { layout: vertical; }
         self._next_uid = 1
         self._visible: list = []
         self._explorer_key: tuple[int | None, int] | None = None
+        self.store = store or QueueStore()
+        self._dirty = True
 
     # ---------------------------------------------------------------- layout
     def compose(self) -> ComposeResult:
@@ -308,6 +312,7 @@ Screen { layout: vertical; }
             spawn=self._spawn,
         )
         self.manager.start()
+        self.restore_queue()
         for url, info in self._seed:
             self.add_job_from_info(url, info)
         for url in self.start_urls:
@@ -331,6 +336,41 @@ Screen { layout: vertical; }
             self.write_log(f"[yellow]{message}[/yellow]")
             self.notify(message, severity="warning", timeout=8)
         self.query_one("#urlbar", Input).focus()
+        self.set_interval(2.0, self.flush_queue)
+
+    # ---------------------------------------------------------- persistence
+    def restore_queue(self) -> None:
+        """Bring back the last queue and re-queue whatever was downloading."""
+        restored = self.store.load()
+        if restored.warning:
+            self.write_log(f"[yellow]{restored.warning}[/yellow]")
+        for job in restored.jobs:
+            self.jobs.append(job)
+            self._next_uid = max(self._next_uid, job.uid + 1)
+        if not restored.jobs:
+            return
+        self.refresh_queue()
+        self.focused_uid = restored.jobs[0].uid
+        self.write_log(f"[dim]queue: {len(restored.jobs)} row(s) restored[/dim]")
+
+        wanted = set(restored.resume)
+        resumable = [job for job in self.jobs if job.uid in wanted]
+        if resumable and self.manager is not None:
+            queued = self.manager.submit(resumable)
+            self.write_log(f"[dim]resuming {queued} download(s)[/dim]")
+
+    def mark_dirty(self) -> None:
+        self._dirty = True
+
+    def flush_queue(self) -> None:
+        if not self._dirty:
+            return
+        self._dirty = False
+        try:
+            self.store.save(self.jobs)
+        except OSError as exc:
+            self._dirty = True
+            self.write_log(f"[yellow]queue: cannot save ({exc})[/yellow]")
 
     # ------------------------------------------------------------- utilities
     def queue(self) -> DataTable:
@@ -405,6 +445,7 @@ Screen { layout: vertical; }
         job = Job(uid=self._next_uid, url=url)
         self._next_uid += 1
         self.jobs.append(job)
+        self.mark_dirty()
         self.refresh_queue()
         self.focused_uid = job.uid
         self.queue().move_cursor(row=len(self.jobs) - 1)
@@ -417,6 +458,7 @@ Screen { layout: vertical; }
         job = Job(uid=self._next_uid, url=url)
         self._next_uid += 1
         self.jobs.append(job)
+        self.mark_dirty()
         self.absorb_info(job, info)
         self.refresh_queue()
         if self.focused_uid is None:
@@ -466,6 +508,7 @@ Screen { layout: vertical; }
                 new.error = f"unavailable ({entry['availability']})"
             added.append(new)
         self.jobs[index:index] = added
+        self.mark_dirty()
         if self.focused_uid == job.uid:
             self.focused_uid = added[0].uid if added else None
         self.refresh_queue()
@@ -608,6 +651,7 @@ Screen { layout: vertical; }
         self.refresh_formats()
 
     def on_job_changed(self, message: JobChanged) -> None:
+        self.mark_dirty()
         try:
             self.update_row(message.uid)
             if message.uid == self.focused_uid:
@@ -623,6 +667,7 @@ Screen { layout: vertical; }
             return  # the app is shutting down
 
     def on_unmount(self) -> None:
+        self.flush_queue()
         if self.manager is not None:
             self.manager.kill_all()
 
@@ -667,6 +712,7 @@ Screen { layout: vertical; }
         return True
 
     def _choice_changed(self, job: Job) -> None:
+        self.mark_dirty()
         self.update_row(job.uid)
         if job.uid == self.focused_uid:
             self.refresh_formats()
@@ -775,6 +821,7 @@ Screen { layout: vertical; }
             job.status = Status.CANCELLED
             self.manager.cancel(job.uid)
         self.jobs.remove(job)
+        self.mark_dirty()
         self.focused_uid = self.jobs[0].uid if self.jobs else None
         self.refresh_queue()
         self.refresh_focused()

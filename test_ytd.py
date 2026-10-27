@@ -48,6 +48,10 @@ from ytd_tui.model import (
     status_label,
 )
 from ytd_tui.app import YtdApp
+from ytd_tui.store import QueueStore, queue_path
+
+# Keep every app test away from the developer's real queue file.
+os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp(prefix="ytd-state-home-")
 
 # Fixture shaped after real `yt-dlp -J` output (Big Buck Bunny 4K probe).
 INFO = {
@@ -994,10 +998,201 @@ async def test_app_delete_and_cancel_bindings():
         assert app.queue().row_count == 0
 
 
+# --------------------------------------------------------------------------- #
+# queue persistence
+# --------------------------------------------------------------------------- #
+def test_queue_path_uses_xdg_state_home():
+    path = queue_path(
+        system="Linux",
+        home=Path("/home/u"),
+        environ={"XDG_STATE_HOME": "/state"},
+    )
+    assert path == Path("/state/ytd/queue.json")
+
+    fallback = queue_path(system="Linux", home=Path("/home/u"), environ={})
+    assert fallback == Path("/home/u/.local/state/ytd/queue.json")
+
+    windows = queue_path(
+        system="Windows", home=Path("C:/Users/u"), environ={"LOCALAPPDATA": "C:/Local"}
+    )
+    assert windows == Path("C:/Local/ytd/queue.json")
+
+
+def test_store_round_trip_keeps_the_queue():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = QueueStore(Path(tmp) / "queue.json")
+        job = Job(
+            uid=3,
+            url=URL,
+            title="Big Buck Bunny",
+            uploader="Blender",
+            duration=635.0,
+            status=Status.DONE,
+            percent=100.0,
+            path="/home/u/Downloads/Big Buck Bunny.mp4",
+        )
+        store.save([job])
+
+        restored = QueueStore(Path(tmp) / "queue.json").load()
+        assert restored.warning == ""
+        assert len(restored.jobs) == 1
+        back = restored.jobs[0]
+        assert (back.uid, back.url, back.title) == (3, URL, "Big Buck Bunny")
+        assert back.uploader == "Blender"
+        assert back.duration == 635.0
+        assert back.status is Status.DONE
+        assert back.percent == 100.0
+        assert back.path == "/home/u/Downloads/Big Buck Bunny.mp4"
+        assert restored.resume == []
+
+
+def test_store_keeps_formats_and_choices():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = QueueStore(Path(tmp) / "queue.json")
+        job = Job(uid=1, url=URL, formats=parse_formats(INFO), video_id="299", audio_id="140")
+        store.save([job])
+
+        back = QueueStore(Path(tmp) / "queue.json").load().jobs[0]
+        assert back.analyzed
+        assert len(back.formats) == len(job.formats)
+        assert (back.video_id, back.audio_id) == ("299", "140")
+        chosen = back.find("299")
+        assert chosen is not None and chosen.height == 1080
+        assert back.selector() == "299+140"
+
+
+def test_store_marks_downloading_rows_for_resume():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = QueueStore(Path(tmp) / "queue.json")
+        busy = Job(uid=1, url=URL, status=Status.DOWNLOADING, percent=40.0)
+        idle = Job(uid=2, url=URL + "&x=1", status=Status.CANCELLED)
+        store.save([busy, idle])
+
+        restored = QueueStore(Path(tmp) / "queue.json").load()
+        assert restored.resume == [1]
+        assert restored.jobs[0].status is Status.LOADED
+        assert restored.jobs[0].percent == 40.0
+        assert restored.jobs[1].status is Status.CANCELLED
+
+
+def test_store_tolerates_a_corrupt_file():
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "queue.json"
+        path.write_text("{not json", encoding="utf-8")
+
+        restored = QueueStore(path).load()
+        assert restored.jobs == [] and restored.resume == []
+        assert "unreadable" in restored.warning
+
+        path.write_text('{"version": 99, "jobs": [{"nope": 1}, "junk"]}', encoding="utf-8")
+        restored = QueueStore(path).load()
+        assert restored.jobs == []
+
+
+def test_store_writes_atomically_and_clears_an_empty_queue():
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "nested" / "queue.json"
+        store = QueueStore(path)
+        store.save([Job(uid=1, url=URL)])
+        assert path.is_file()
+        assert sorted(p.name for p in path.parent.iterdir()) == ["queue.json"]
+
+        store.save([])
+        assert QueueStore(path).load().jobs == []
+        assert sorted(p.name for p in path.parent.iterdir()) == ["queue.json"]
+
+
+def test_download_command_continues_partial_files():
+    job = Job(uid=1, url=URL, video_id="299", audio_id="140")
+    cmd = download_command(job, "/tmp/out", prefix=["yt-dlp"])
+    assert "--continue" in cmd
+    assert cmd.index("--continue") < cmd.index("--newline")
+
+
+async def test_app_flush_writes_the_queue_to_disk():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = QueueStore(Path(tmp) / "queue.json")
+        app = YtdApp(store=store)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.jobs.append(Job(uid=1, url=URL, title="Hand made"))
+            app.mark_dirty()
+            app.flush_queue()
+        assert [job.title for job in QueueStore(store.path).load().jobs] == ["Hand made"]
+
+
+async def test_app_restores_the_queue_from_disk():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = QueueStore(Path(tmp) / "queue.json")
+        store.save(
+            [
+                Job(
+                    uid=1,
+                    url=URL,
+                    title="Saved row",
+                    formats=parse_formats(INFO),
+                    video_id="299",
+                    audio_id="140",
+                    status=Status.DONE,
+                    percent=100.0,
+                )
+            ]
+        )
+        app = YtdApp(store=store, merge_format="mp4")
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            assert len(app.jobs) == 1
+            assert app.jobs[0].title == "Saved row"
+            assert app.jobs[0].selector() == "299+140"
+            assert app.queue().row_count == 1
+
+
+async def test_app_resumes_rows_that_were_downloading():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = QueueStore(Path(tmp) / "queue.json")
+        store.save([Job(uid=1, url=URL, title="Partial", status=Status.DOWNLOADING, percent=40.0)])
+        seen: list[list[str]] = []
+        app = YtdApp(
+            store=store,
+            spawn=spawner(
+                lambda: FakeProc(["[download]  40.0% of 1.00MiB at 1.00MiB/s"], code=0),
+                seen=seen,
+            ),
+            merge_format="mp4",
+        )
+        async with app.run_test() as pilot:
+            assert await pump(pilot, lambda: app.jobs and app.jobs[0].status is Status.DONE)
+            assert seen and seen[0][-1] == URL
+            assert "--continue" in seen[0]
+
+
+async def test_app_saves_what_was_downloading_when_it_leaves():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = QueueStore(Path(tmp) / "queue.json")
+        hold = asyncio.Event()
+        app = YtdApp(
+            seed=[(URL, INFO)],
+            store=store,
+            spawn=spawner(lambda: FakeProc(hold=hold)),
+            merge_format="mp4",
+        )
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.action_start_all()
+            assert await pump(pilot, lambda: app.jobs[0].status is Status.DOWNLOADING)
+            await pilot.pause()
+        hold.set()
+        saved = QueueStore(store.path).load()
+        assert saved.jobs and saved.jobs[0].status is Status.LOADED
+        assert saved.resume == [saved.jobs[0].uid]
+
+
 def main() -> int:
     tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_")]
     failed = 0
     for name, fn in tests:
+        # Every test gets a throwaway state dir: the queue file is real state.
+        os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp(prefix="ytd-state-test-")
         try:
             if inspect.iscoroutinefunction(fn):
                 asyncio.run(fn())

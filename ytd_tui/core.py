@@ -292,12 +292,16 @@ async def run_json(
 
 
 def download_command(job, outdir: str, prefix: list[str] | None = None) -> list[str]:
-    """`-f` only when the user picked a format; otherwise the config wins."""
+    """`-f` only when the user picked a format; otherwise the config wins.
+
+    `--continue` is explicit (and wins over the user config) so a download
+    paused by leaving the TUI resumes its `.part` file next time.
+    """
     cmd = list(prefix or ytdlp_prefix())
     selector = job.selector()
     if selector:
         cmd += ["-f", selector]
-    cmd += ["-P", f"home:{outdir}", "--newline", job.url]
+    cmd += ["-P", f"home:{outdir}", "--continue", "--newline", job.url]
     return cmd
 
 

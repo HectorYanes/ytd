@@ -81,6 +81,15 @@ attached; installing as a tool is the better experience.
 | `estado` | `cargada`, `descargando (45%)`, `completado`, `error: …`, `cancelado` |
 | `tamaño` | expected size from the format metadata |
 
+The queue lives on disk, so it survives closing the TUI:
+`$XDG_STATE_HOME/ytd/queue.json` (`~/.local/state/ytd/queue.json` by default;
+`%LOCALAPPDATA%` on Windows, `~/Library/Application Support` on macOS). Leaving
+pauses whatever was downloading; coming back restores every row — formats and
+choices included — and re-queues the paused downloads with `--continue`, so
+yt-dlp picks up the `.part` file instead of starting over. A corrupt or foreign
+queue file is ignored with a note in the log instead of blocking startup. Two
+instances at once are not coordinated: the last one to save wins.
+
 Pasting a link appends a row and analyzes it in the background
 (`yt-dlp -J --flat-playlist`, one call handles both single videos and
 playlists). Duplicate URLs are skipped with a notice. A failure marks only its
@@ -215,6 +224,10 @@ It exits `1` when yt-dlp or ffmpeg is missing.
 - **A non-zero exit can still carry usable JSON.** yt-dlp exits 1 when a cookie
   backend warns while still emitting complete metadata, so the payload wins
   over the exit code — but a literal `null` payload is an error, not a video.
+- **The queue file is written, not flushed per tick.** Every progress update
+  marks the queue dirty and a 2 s timer writes it; `on_unmount` flushes one last
+  time before `kill_all()`, which is why a paused download still comes back as
+  `descargando` on disk and gets re-queued on the next start.
 - **One asyncio worker per concurrency slot.** `DownloadManager` reads yt-dlp's
   `--newline` progress from stdout, so no threads and no polling.
 - **Symlink launcher.** `sys.path[0]` becomes `~/.local/bin` when `ytd.py` is a
@@ -231,4 +244,6 @@ the availability report, progress parsing, the child environment (POSIX and
 Windows path syntax), config discovery per OS, yt-dlp resolution order, the
 `--check` report, the queue model, the download pool (progress, errors, cancel,
 concurrency cap, dedupe), the JSON guard, and the TUI itself (rows, filtering,
-selection, status cells, key bindings, and an 80x24 layout regression).
+selection, status cells, key bindings, and an 80x24 layout regression), plus
+queue persistence (round trip, formats and choices, `descargando` → re-queue,
+corrupt file, atomic write, restore and auto-resume on start).
