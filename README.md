@@ -1,234 +1,127 @@
-# ytd — a queue TUI for yt-dlp
+# ytd
 
-Paste one link or twenty. Each one becomes a row with the quality it will
-download, the audio that goes with it, and a live status. The format table
-below is for the focused row only, so you see 8 filters and one video instead
-of `yt-dlp -F`'s wall of 47 rows.
+A queue TUI for [yt-dlp](https://github.com/yt-dlp/yt-dlp): paste URLs, pick the
+exact video and audio streams, and watch several downloads at once.
 
-Runs on Linux, macOS and Windows with the same keys and the same queue.
+It is a single Go binary. On first use it downloads its own `yt-dlp` and `deno`
+into a cache directory, so a fresh machine needs nothing but `ffmpeg`.
+
+```
+┌ ytd — yt-dlp queue                                    out ~/Downloads
+│ › paste a URL (or several, space separated) and press Enter
+│ #  título                  calidad       audio        estado        tamaño
+│ 1  Big Buck Bunny 60fps    1080p60 · av1 opus 160k    descargando (42%)  4.1M
+│
+│ 2160p60 · av1 · video-only
+│ 1080p60 · av1 · video-only
+│ 1080p   · h264 · video-only
+│ audio   · opus · audio-only
+│
+│ / filter…                              kind:all ext:mp4 sized:false hls:true
+│ sel id    kind   res      vcodec acodec hdr fps br     size    ext  src note
+│ V   399   video  1080p60  av1    —      —   60  3.0M   —       mp4  —   —
+│ A   251   audio  audio    —      opus   —   —   160k   —       webm —   —
+│
+│ Big Buck Bunny · calidad: 1080p60 · av1 · audio: opus 160k · -f 399+251
+```
 
 ## Install
 
-You need [uv](https://docs.astral.sh/uv/) and — for merging video+audio and
-embedding metadata — `ffmpeg`. Everything Python-side (yt-dlp, the JavaScript
-runtime YouTube requires, Textual) is installed for you.
+Requirements: `ffmpeg` on `PATH`. Everything else is handled by the binary.
 
-| system | install the prerequisites | then |
-| --- | --- | --- |
-| Windows (PowerShell) | `winget install --id astral-sh.uv -e`<br>`winget install --id Gyan.FFmpeg -e` | `uv tool install ytd_tui-0.2.0-py3-none-any.whl` |
-| macOS | `brew install uv ffmpeg` | `uv tool install ytd_tui-0.2.0-py3-none-any.whl` |
-| Linux | `curl -LsSf https://astral.sh/uv/install.sh \| sh` and install `ffmpeg` | `uv tool install ytd_tui-0.2.0-py3-none-any.whl` |
+- **Prebuilt binary** — grab the archive for your OS/arch from the releases page,
+  unpack it, and put `ytd` somewhere on `PATH`.
+- **From source** — needs Go 1.26+:
 
-### One command instead of those steps
+  ```sh
+  git clone <repo> ~/tools/ytd && cd ~/tools/ytd
+  ./install.sh              # Linux/macOS → ~/.local/bin
+  .\install.ps1             # Windows → %LOCALAPPDATA%\ytd\bin
+  ```
 
-`install.sh` (Linux/macOS) and `install.ps1` (Windows) do exactly the table
-above: install `uv` and `ffmpeg` when they are missing, install this folder's
-wheel as a tool, then run `ytd --check`.
+  Both scripts build with `-trimpath -ldflags "-s -w"`, run `ytd --update` and
+  then `ytd --check`.
 
-```bash
-./install.sh
+## First run
+
+```sh
+ytd                          # empty queue
+ytd URL [URL ...]            # queue these on start
+ytd -o ~/Videos -j 2 URL     # other output dir, two parallel downloads
+ytd --check                  # environment report, no TUI
+ytd --update                 # refresh the managed yt-dlp and deno
 ```
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\install.ps1
-```
-
-`install.ps1` also takes `-SkipFfmpeg` and `-SkipCheck`. If a `ytd` you put in
-the tool directory by hand already exists, both scripts stop instead of
-overwriting it (`YTD_ALLOW_OVERWRITE=1` / `$env:YTD_ALLOW_OVERWRITE=1` to
-proceed).
-
-A full install is about **150 MB** (92 MB of it is the deno runtime YouTube
-needs; the Python side is ~55 MB). `ffmpeg` is a separate system package.
-
-Open a fresh terminal after installing `uv`/`ffmpeg` so `PATH` picks them up.
-From inside the source folder, `uv tool install .` does the same as the wheel.
-
-```bash
-ytd                                   # empty queue, paste URLs
-ytd 'https://youtu.be/…' 'https://…'  # queue them on start
-ytd -o ~/Videos -j 4 'URL'            # custom dir, 4 downloads at once
-ytd --check                           # diagnose yt-dlp / ffmpeg / config
-```
-
-`pipx install .` works too. `ytd` gets its own environment, so it never
-touches your system Python.
-
-### Without installing anything
-
-The folder also runs in place, provisioning its dependencies on first launch
-(cached afterwards):
-
-```powershell
-.\ytd.cmd              # Windows
-```
-
-```bash
-uv run ytd.py          # Linux / macOS
-```
-
-This path is slower to start the very first time and leaves the console
-attached; installing as a tool is the better experience.
-
-## The queue
-
-| column | meaning |
-| --- | --- |
-| `#` | row order |
-| `título` | video title (the URL until analyzed) |
-| `calidad` | video stream that will be used, `auto (best)` when unnamed |
-| `audio` | audio stream, or `— (incluido)` for muxed formats |
-| `estado` | `cargada`, `descargando (45%)`, `completado`, `error: …`, `cancelado` |
-| `tamaño` | expected size from the format metadata |
-
-Pasting a link appends a row and analyzes it in the background
-(`yt-dlp -J --flat-playlist`, one call handles both single videos and
-playlists). Duplicate URLs are skipped with a notice. A failure marks only its
-own row.
+`--check` prints the version, the resolved yt-dlp (with its version), ffmpeg,
+the JavaScript runtime, the yt-dlp config it found, the merge container and the
+output directory. It exits non-zero when yt-dlp or ffmpeg is missing.
 
 ## Keys
 
 | key | action |
 | --- | --- |
-| `Enter` in the URL field | queue the URL(s), space separated |
-| `v` | set the highlighted format row as the **video** part |
-| `a` | set the highlighted format row as the **audio** part |
-| `e` | analyze the focused row, or open the format editor once it is analyzed |
+| `Enter` (URL bar) | queue every URL in the bar |
+| `↓` / `Tab` | leave the URL bar, enter the queue |
+| `↑` `↓` `k` `j` | move through the queue |
+| `e` | analyze the row; on an analyzed row, edit its streams |
+| `v` / `a` | take the explorer's current row as video / audio-only |
 | `d` | download the focused row |
-| `s` | download every pending row |
+| `s` | download every loaded, failed or cancelled row |
 | `x` | cancel the focused download |
-| `Delete` | remove the focused row |
-| `c` | show only formats the merge container accepts |
-| `r` | reset the choice back to the automatic pick |
-| `f` | jump to the filter box |
-| `l` | toggle the log pane |
-| `q` | quit |
+| `delete` | remove the row (cancelling it if needed) |
+| `c` | show only streams compatible with the merge container |
+| `r` | reset the choice to the recommended streams |
+| `f` | filter the explorer (`1080`, `av1`, `opus`, `muxed`…) |
+| `i` / `o` / `h` / `p` | cycle kind, cycle ext, toggle HLS, only sized |
+| `l` | show or hide the log |
+| `q` | quit (`Ctrl+C` works everywhere) |
 
-Filtering is live: the free-text box matches id, extension, kind, resolution,
-both codecs, HDR, notes and language. The dropdowns narrow by kind and
-container; the checkboxes hide formats with no known size and hide HLS
-variants. Storyboards are hidden unless you select "images".
+In the editor: `Tab` switches video/audio, `↑↓` move, `i` reveals incompatible
+streams, `Enter` applies, `Esc` cancels.
 
-## Why select two rows
+## How it works
 
-Above 720p YouTube serves video and audio as separate streams — a "1080p MP4"
-does not exist as a single file. `ytd` makes that explicit: `v` + `a` builds
-`-f 137+140`, and the availability panel tells you which heights are muxed,
-which are HLS-only, and which are video-only.
-
-If you never pick, the row downloads with **no `-f` at all**, so your yt-dlp
-config's `--format "bv*+ba/b"` decides.
-
-`e` opens an editor with a video and an audio dropdown. It only lists streams
-the merge container can hold: with `--merge-output-format mp4`, VP9 video and
-Opus/Vorbis audio are hidden — muxing those into MP4 means a silent re-encode,
-which is exactly the trap `yt-dlp -F` hides from you. `c` applies the same rule
-to the explorer table, and any incompatible row is flagged in the `note`
-column.
-
-## Interaction with your yt-dlp config
-
-Your config is still loaded (cookies, output template, merge container,
-embedding). `ytd` only overrides two things:
-
-- `-f` — your selection wins over `--format` in the config, and only when you
-  selected something.
-- `-P home:<dir>` — the output directory, verified to override a `--paths`
-  entry from the config.
-
-Where the config lives, per platform:
-
-| system | paths checked, first hit wins |
-| --- | --- |
-| Windows | `%APPDATA%\yt-dlp\config`, `config.txt`, `%USERPROFILE%\yt-dlp.conf` |
-| macOS | `~/Library/Application Support/yt-dlp/config`, `config.txt`, `~/yt-dlp.conf` |
-| Linux | `$XDG_CONFIG_HOME/yt-dlp/config`, `config.txt`, `~/yt-dlp.conf`, `/etc/yt-dlp.conf` |
-
-`ytd --check` prints the one it actually found.
-
-## Which yt-dlp runs
-
-Most specific first:
-
-1. `YTD_YTDLP` — an explicit path you set.
-2. `yt-dlp` on your `PATH` — your own install, with its own extras.
-3. The copy bundled with this package (`python -m yt_dlp`), used when there is
-   no system yt-dlp. This is the normal case on Windows after
-   `uv tool install`.
-
-The bundled copy also brings a **JavaScript runtime** (deno). YouTube returns no
-formats at all without one — not even `-f 18` — so it is a hard dependency, and
-`--check` reports where it was found. If you prefer your own, any of
-`deno`, `node`, `bun` on `PATH` is used, and `YTD_YTDLP` points at a specific
-yt-dlp binary.
-
-`ffmpeg` is not bundled. Without it, muxed downloads such as `-f 18` still
-work, but merging separate video+audio and embedding metadata/thumbnails fail;
-`ytd --check` says so and the UI warns at startup.
+- **Analysis is lazy and flat.** A URL is analyzed with `yt-dlp -J
+  --flat-playlist`; a playlist becomes one row per entry and each row is
+  analyzed only when you ask for it.
+- **Your yt-dlp config wins.** `ytd` passes no `-f` unless you chose streams, so
+  `~/.config/yt-dlp/config` decides; `-P home:<outdir>` still overrides
+  `--paths`. The merge container (`--merge-output-format`) is read from that
+  config and drives the compatibility matrix: `mp4` accepts h264/h265/av1 with
+  aac/mp3/ac3/eac3/alac, `webm` takes vp8/vp9/av1 with opus/vorbis, and `mkv`
+  takes anything.
+- **Streams are fetched separately.** The first run downloads yt-dlp and deno
+  into `<cache>/ytd/bin` (`~/.cache/ytd/bin` on Linux, `~/Library/Caches/...`
+  on macOS, `%LOCALAPPDATA%` on Windows) and verifies the published checksums.
+  `YTD_YTDLP=/path/to/yt-dlp` and a `yt-dlp` already on `PATH` take precedence.
 
 ## Troubleshooting
 
-Start with:
+- **No formats listed for a YouTube URL** — YouTube needs a JavaScript runtime
+  to expose formats at all. The app warns at startup; `ytd --update` installs
+  `deno`. Without it, even `-f 18` fails with `Requested format is not available`.
+- **`ERROR: failed to read from keyring`** — yt-dlp's cookie backend could not
+  reach the secret store. Downloads usually still work; unlock the keyring or
+  drop `--cookies-from-browser` from the config if it keeps failing.
+- **A merge falls back to re-encoding** — one of the two streams is not
+  compatible with `--merge-output-format`. The explorer marks those rows and the
+  editor flags them; `c` shows only compatible ones.
+- **`--check` says yt-dlp is missing** — run `ytd --update`, or install yt-dlp
+  yourself and set `YTD_YTDLP`.
 
-```bash
-ytd --check
+## Development
+
+```sh
+go test ./...            # unit and program tests, no network
+YTD_E2E=1 go test ./...  # adds the real YouTube probes
+go vet ./... && gofmt -l .
 ```
 
-```
-ytd        0.2.0
-python     3.14.0
-platform   Linux 7.1.8-1-cachyos (x86_64)
-yt-dlp     bundled module (/…/bin/python -m yt_dlp)
-yt-dlp ver 2026.10.21
-ffmpeg     /usr/bin/ffmpeg
-js runtime /…/bin/deno
-config     /home/…/.config/yt-dlp/config
-container  mp4
-outdir     /home/…/Downloads
-```
+Layout: `internal/format` (the domain model: formats, filters, compatibility,
+selection, job), `internal/ytdlp` (the yt-dlp boundary: resolution, config,
+progress, verified downloads, analysis, download pool), `internal/ui`
+(bubbletea model, view and editor), `cmd/ytd` (flags).
 
-It exits `1` when yt-dlp or ffmpeg is missing.
+## License
 
-- **YouTube rows fail with "Requested format is not available".** No JavaScript
-  runtime. Install deno/node, or install this package with its default
-  dependencies.
-- **"ffmpeg is not installed" on merge.** Install ffmpeg and reopen the
-  terminal; on Windows `winget install Gyan.FFmpeg` then a new window.
-- **Cookies fail on Linux** (`cannot decrypt v11 cookies`). The cookie backend
-  needs `secretstorage`; the package installs it on Linux automatically. A
-  hand-rolled `pip install yt-dlp` without extras does not.
-- **Text looks wrong on Windows.** Use Windows Terminal; the legacy console
-  host works but renders the box drawing poorly.
-
-## Implementation notes
-
-- **Textual `App.log` collision.** `App` already owns `.log` (a `Logger`);
-  defining `def log(self, …)` silently breaks `self.call_from_thread`. The
-  helper here is `write_log`.
-- **uv shadows the system interpreter.** `yt-dlp`'s launcher resolves its
-  interpreter via `/usr/bin/env python3`. Inside a `uv run` script, PATH points
-  at uv's managed CPython, which has no `secretstorage`, so
-  `--cookies-from-browser …+gnomekeyring` dies with "cannot decrypt v11
-  cookies". `child_env()` prunes the uv entries from the child PATH, and adds
-  our own `bin`/`Scripts` directory only when the bundled module runs, so the
-  bundled deno is visible.
-- **A non-zero exit can still carry usable JSON.** yt-dlp exits 1 when a cookie
-  backend warns while still emitting complete metadata, so the payload wins
-  over the exit code — but a literal `null` payload is an error, not a video.
-- **One asyncio worker per concurrency slot.** `DownloadManager` reads yt-dlp's
-  `--newline` progress from stdout, so no threads and no polling.
-- **Symlink launcher.** `sys.path[0]` becomes `~/.local/bin` when `ytd.py` is a
-  symlink, so the entry inserts its real directory before importing `app`.
-
-## Tests
-
-```bash
-uv run --with textual python test_ytd.py     # no pytest needed
-```
-
-Covers codec mapping, format classification, size fallbacks, every filter,
-the availability report, progress parsing, the child environment (POSIX and
-Windows path syntax), config discovery per OS, yt-dlp resolution order, the
-`--check` report, the queue model, the download pool (progress, errors, cancel,
-concurrency cap, dedupe), the JSON guard, and the TUI itself (rows, filtering,
-selection, status cells, key bindings, and an 80x24 layout regression).
+MIT — see `LICENSE`.

@@ -30,10 +30,10 @@ empaqueta: se detecta, se reporta en `--check` y la UI avisa al arrancar.
 | --- | --- | --- | --- | --- |
 | T1 | S2, S4 | inline | done — `internal/format` (modelo, filtros, compatibilidad, informe, selección, job) + 23 tests | f97073d |
 | T2 | S3, S4 | inline | done — `internal/ytdlp` (resolución, config por OS, progreso, descarga verificada, análisis, pool) + tests + probe real | this slice |
-| T3 | S2 | inline | pending — TUI bubbletea: input, tabla de cola, estados, teclas, log | — |
-| T4 | S2 | inline | pending — explorador de formatos, editor modal, filtro `c`, panel de disponibilidad | — |
-| T5 | S1, S2 | inline | pending — `cmd/ytd`: flags (`-o`, `-j`, `--check`, `--update`), cableado del app | — |
-| T6 | S1, S3 | inline | pending — borrar el árbol Python, installers y README para el binario único | — |
+| T3 | S2 | inline | done — `internal/ui`: barra de URL, cola, informe, filtros, explorador, slots, log | 4b1f2ff |
+| T4 | S2 | inline | done — editor modal (video/audio, tab, `i`), `c` compat, panel de disponibilidad | 4b1f2ff |
+| T5 | S1, S2 | inline | done — `cmd/ytd`: `-o`, `-j`, `--check`, `--update`, `--version`, URLs | 4b1f2ff |
+| T6 | S1, S3 | inline | done — árbol Python borrado, installers y README para el binario único | este slice |
 
 ## Log
 
@@ -58,3 +58,19 @@ empaqueta: se detecta, se reporta en `--check` y la UI avisa al arrancar.
   selección por defecto `315+140-drc`, con el yt-dlp del sistema (2026.09.16).
   La diferencia con los 48 formatos de la corrida Python viene de la versión de
   yt-dlp, no de la lógica: el port de `DefaultSelection` está cubierto por test.
+
+- **L7** (evidence): 68 tests en `go test ./...`, más dos probes opt-in con
+  `YTD_E2E=1`: `TestAnalyzeRealURL` (53 formatos) y
+  `TestProgramRunsAgainstYouTube`, que corre el programa real con
+  `tea.Program` headless, espera el análisis, manda `q` y verifica título,
+  selección y que algo se renderizó.
+- **L8** (decision): en la barra de URL, `q` con el campo vacío sale; con texto
+  escrito se escribe la `q`. Sin eso el primer estado de la app no tenía salida
+  por teclado salvo `Ctrl+C` (Textual tenía la misma trampa y no la quisimos
+  copiar).
+- **L9** (evidence): cross-compila limpio para linux/amd64, linux/arm64,
+  darwin/amd64, darwin/arm64 y windows/amd64 con `-s -w`: 6.9–7.7 MB por
+  binario, contra los 148–152 MB que pesaba la instalación Python con deno y
+  site-packages.
+- **L10** (pending): `install.ps1` sigue sin probarse en Windows real (no hay
+  PowerShell en esta máquina); el binario windows/amd64 sí compila.

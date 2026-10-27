@@ -1,6 +1,3 @@
-__pycache__/
-*.pyc
 .venv/
-*.svg
 dist/
-*.egg-info/
+*.exe
