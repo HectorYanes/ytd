@@ -179,15 +179,19 @@ type rawFormat struct {
 
 // Info is the part of `yt-dlp -J` output the app uses.
 type Info struct {
-	Type       string      `json:"_type"`
-	ID         string      `json:"id"`
-	Title      string      `json:"title"`
-	Uploader   string      `json:"uploader"`
-	Duration   float64     `json:"duration"`
-	IsLive     bool        `json:"is_live"`
-	WebpageURL string      `json:"webpage_url"`
-	Entries    []Info      `json:"entries"`
-	Formats    []rawFormat `json:"formats"`
+	Type       string  `json:"_type"`
+	ID         string  `json:"id"`
+	Title      string  `json:"title"`
+	Uploader   string  `json:"uploader"`
+	Duration   float64 `json:"duration"`
+	IsLive     bool    `json:"is_live"`
+	WebpageURL string  `json:"webpage_url"`
+	// URL and Availability appear on flat playlist entries: URL is the video
+	// page address and Availability flags private or premium entries.
+	URL          string      `json:"url"`
+	Availability string      `json:"availability"`
+	Entries      []Info      `json:"entries"`
+	Formats      []rawFormat `json:"formats"`
 }
 
 func jsonString(value any) string {
@@ -773,11 +777,15 @@ func (j *Job) Audio() *Fmt { return j.Find(j.AudioID) }
 // Selector is the explicit `-f` value; empty means "let the config decide".
 func (j *Job) Selector() string { return BuildFormatSelector(j.VideoID, j.AudioID) }
 
-// Label is the title column, truncated to limit runes.
+// Label is the title column; a positive limit truncates to that many runes and
+// zero keeps the whole title.
 func (j *Job) Label(limit int) string {
 	text := j.Title
 	if text == "" {
 		text = j.URL
+	}
+	if limit <= 0 {
+		return text
 	}
 	runes := []rune(text)
 	if len(runes) <= limit {

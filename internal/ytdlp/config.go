@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 )
 
@@ -95,4 +96,9 @@ func HomeDir() string {
 		return "."
 	}
 	return home
+}
+
+// DetectUserMergeFormat reads the merge container from this machine's config.
+func DetectUserMergeFormat() string {
+	return DetectMergeFormat(runtime.GOOS, HomeDir(), EnvironMap())
 }
