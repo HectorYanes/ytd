@@ -41,7 +41,7 @@ empaqueta: se detecta, se reporta en `--check` y la UI avisa al arrancar.
 | T4 | S2 | inline | done — editor modal (video/audio, tab, `i`), `c` compat, panel de disponibilidad | 4b1f2ff |
 | T5 | S1, S2 | inline | done — `cmd/ytd`: `-o`, `-j`, `--check`, `--update`, `--version`, URLs | 4b1f2ff |
 | T6 | S1, S3 | inline | done — árbol Python borrado, installers y README para el binario único | este slice |
-| T7 | S5 | inline | done — `internal/ui/view.go` rediseñado (barra tipo Textual, explorador de formatos dominante, colores por kind, slots y progreso) + navegación URL→cola→formatos→filtro, rueda/clic de mouse, 7 tests nuevos | sin commit |
+| T7 | S5 | inline | done — `internal/ui/view.go` rediseñado (barra tipo Textual, explorador de formatos dominante, colores por kind, slots y progreso) + navegación URL→cola→formatos→filtro, rueda/clic de mouse, 7 tests nuevos | 454d74c |
 
 ## Log
 
