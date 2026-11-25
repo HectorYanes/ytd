@@ -94,3 +94,8 @@ empaqueta: se detecta, se reporta en `--check` y la UI avisa al arrancar.
   elección va `best`. Implementado: paneles URL→cola→formatos→filtro con `tab`,
   flechas y PageUp/Down en formatos, rueda y clic de mouse, y `enter` en la
   barra de URL lleva directo al explorador.
+- **L14** (evidence): commit `454d74c` (`feat(ui): redesign the TUI...`).
+  `go test -count=1 ./...` verde; `gentle-ai review assess --base-ref 0e489d1
+  --committed-only` devuelve `risk: medium`, `review_due: false`
+  (`under_budget`). El probe real `YTD_E2E=1 TestProgramRunsAgainstYouTube`
+  vuelve a pasar con el layout nuevo (59 s, análisis real y `q`).
