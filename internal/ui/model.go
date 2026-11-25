@@ -14,6 +14,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"ytd/internal/format"
+	"ytd/internal/store"
 	"ytd/internal/ytdlp"
 )
 
@@ -29,6 +30,7 @@ type Options struct {
 	Spawn         ytdlp.SpawnFunc
 	Analyze       AnalyzeFunc
 	Seed          []format.Job // pre-analyzed rows, used by tests
+	StatePath     string       // queue file; empty means the per-user default
 }
 
 var (
@@ -106,6 +108,9 @@ type Model struct {
 
 	width  int
 	height int
+	// bodyWidth is the main column's width, excluding the vertical log panel.
+	// It is recomputed on every render.
+	bodyWidth int
 
 	jobs  []format.Job
 	focus int
@@ -134,6 +139,8 @@ type Model struct {
 	noticeAt time.Time
 
 	manager   *ytdlp.Manager
+	store     *store.Store
+	dirty     bool
 	updates   chan format.Job
 	pending   map[int]bool
 	analyzeFn AnalyzeFunc
@@ -189,6 +196,21 @@ func New(options Options) *Model {
 		analyzeFn:     analyze,
 	}
 
+	statePath := options.StatePath
+	if statePath == "" {
+		if path, err := store.QueuePath(); err == nil {
+			statePath = path
+		}
+	}
+	var restored store.Restored
+	if statePath != "" {
+		m.store = store.New(statePath)
+		restored = m.store.Load()
+	}
+	for _, job := range restored.Jobs {
+		m.jobs = append(m.jobs, job)
+	}
+
 	if resolution, err := ytdlp.Resolve(); err == nil {
 		m.ytdlpOrigin = resolution.Origin
 	} else {
@@ -228,6 +250,25 @@ func New(options Options) *Model {
 	if m.jsRuntime == "" {
 		m.writeLog("warn", "No JavaScript runtime found: YouTube will not list formats. Install deno or node, or run ytd --update.")
 	}
+	if m.store != nil {
+		if restored.Warning != "" {
+			m.writeLog("warn", restored.Warning)
+		}
+		if len(restored.Jobs) > 0 {
+			m.writeLog("dim", fmt.Sprintf("queue: %d row(s) restored", len(restored.Jobs)))
+		}
+		if len(restored.Resume) > 0 {
+			resumable := make([]format.Job, 0, len(restored.Resume))
+			for _, uid := range restored.Resume {
+				if job := m.jobByUID(uid); job != nil {
+					resumable = append(resumable, *job)
+				}
+			}
+			if queued := m.manager.Submit(resumable...); queued > 0 {
+				m.writeLog("dim", fmt.Sprintf("resuming %d download(s)", queued))
+			}
+		}
+	}
 	m.refreshDerived()
 	return m
 }
@@ -245,6 +286,9 @@ func (m *Model) nextUID() int {
 // Init focuses the URL bar and starts the manager pump.
 func (m *Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{m.urlInput.Focus(), m.waitUpdate()}
+	if m.store != nil {
+		cmds = append(cmds, m.flushCmd())
+	}
 	cmds = append(cmds, m.initCmds...)
 	return tea.Batch(cmds...)
 }
@@ -262,6 +306,41 @@ type analyzeMsg struct {
 }
 
 type noticeExpired struct{ at time.Time }
+
+// flushMsg is the periodic tick that writes a dirty queue to disk.
+type flushMsg struct{}
+
+// flushCmd schedules the next queue write, mirroring the two-second interval the
+// Textual version used.
+func (m *Model) flushCmd() tea.Cmd {
+	if m.store == nil {
+		return nil
+	}
+	return tea.Tick(2*time.Second, func(time.Time) tea.Msg { return flushMsg{} })
+}
+
+// markDirty says the queue changed and must reach disk on the next tick.
+func (m *Model) markDirty() { m.dirty = true }
+
+// flushQueue writes the queue when it changed. A failure keeps the row dirty so
+// the next tick retries, and reports the problem in the log.
+func (m *Model) flushQueue() {
+	if m.store == nil || !m.dirty {
+		return
+	}
+	m.dirty = false
+	if err := m.store.Save(m.jobs); err != nil {
+		m.dirty = true
+		m.writeLog("warn", "queue: cannot save ("+err.Error()+")")
+	}
+}
+
+// quit flushes the queue before leaving, so an immediate q never loses a row.
+func (m *Model) quit() tea.Cmd {
+	m.quitting = true
+	m.flushQueue()
+	return tea.Quit
+}
 
 func (m *Model) waitUpdate() tea.Cmd {
 	return func() tea.Msg {
@@ -310,10 +389,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case flushMsg:
+		m.flushQueue()
+		return m, m.flushCmd()
+
 	case tea.KeyMsg:
 		if typed.String() == "ctrl+c" {
-			m.quitting = true
-			return m, tea.Quit
+			return m, m.quit()
 		}
 		return m, m.handleKey(typed)
 	case tea.MouseMsg:
@@ -330,6 +412,7 @@ func (m *Model) applySnapshot(job format.Job) {
 		previous := m.jobs[index].Status
 		job.Formats = m.jobs[index].Formats // formats live in the UI, not the manager
 		m.jobs[index] = job
+		m.markDirty()
 		if previous != job.Status {
 			m.onStatusChange(job)
 		}
@@ -398,6 +481,7 @@ func (m *Model) absorb(job *format.Job, result ytdlp.AnalyzeResult) []tea.Cmd {
 	if job.VideoID == "" && job.AudioID == "" {
 		job.VideoID, job.AudioID = format.DefaultSelection(job.Formats, "")
 	}
+	m.markDirty()
 	return nil
 }
 
@@ -438,6 +522,7 @@ func (m *Model) expandPlaylist(job *format.Job, info format.Info) []tea.Cmd {
 		added = append(added, *fresh)
 	}
 	m.jobs = append(m.jobs[:index], append(added, m.jobs[index:]...)...)
+	m.markDirty()
 	if index < len(m.jobs) && len(added) > 0 {
 		m.focus = index
 	} else {
@@ -476,8 +561,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 			// With nothing typed, q is a quit rather than a stray character;
 			// once there is text the bar keeps it so a URL is never lost.
 			if m.urlInput.Value() == "" {
-				m.quitting = true
-				return tea.Quit
+				return m.quit()
 			}
 		case "enter":
 			raw := strings.TrimSpace(m.urlInput.Value())
@@ -618,8 +702,7 @@ func (m *Model) handleBodyKey(msg tea.KeyMsg) tea.Cmd {
 	key := msg.String()
 	switch key {
 	case "q":
-		m.quitting = true
-		return tea.Quit
+		return m.quit()
 	case "tab":
 		return m.cycleArea(true)
 	case "shift+tab":
@@ -701,6 +784,7 @@ func (m *Model) handleBodyKey(msg tea.KeyMsg) tea.Cmd {
 	case "r":
 		if job := m.focusedJob(); job != nil {
 			job.VideoID, job.AudioID = format.DefaultSelection(job.Formats, "")
+			m.markDirty()
 			m.refreshDerived()
 		}
 	case "l":
@@ -764,6 +848,7 @@ func (m *Model) addURL(url string) []tea.Cmd {
 	m.focus = len(m.jobs) - 1
 	m.fmtCursor = 0
 	m.pending[job.UID] = true
+	m.markDirty()
 	m.writeLog("dim", "$ yt-dlp -J --flat-playlist "+url)
 	m.refreshDerived()
 	return []tea.Cmd{m.analyzeCmd(job.UID, url)}
@@ -861,6 +946,7 @@ func (m *Model) cancelJob() tea.Cmd {
 	}
 	job.Status = format.Cancelled
 	m.manager.Cancel(job.UID)
+	m.markDirty()
 	m.refreshDerived()
 	return nil
 }
@@ -878,6 +964,7 @@ func (m *Model) deleteJob() {
 	m.jobs = append(m.jobs[:index], m.jobs[index+1:]...)
 	m.focus = clampFocus(index, m.jobs)
 	m.fmtCursor = 0
+	m.markDirty()
 	m.refreshDerived()
 }
 
@@ -901,6 +988,7 @@ func (m *Model) pickVideo(formatID string) bool {
 	if candidate.Kind == format.Muxed {
 		job.AudioID = ""
 	}
+	m.markDirty()
 	m.refreshDerived()
 	return true
 }
@@ -915,6 +1003,7 @@ func (m *Model) pickAudio(formatID string) bool {
 		return false
 	}
 	job.AudioID = candidate.ID
+	m.markDirty()
 	m.refreshDerived()
 	return true
 }

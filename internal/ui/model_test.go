@@ -3,12 +3,16 @@ package ui
 import (
 	"context"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 
 	"ytd/internal/format"
+	"ytd/internal/store"
 	"ytd/internal/ytdlp"
 )
 
@@ -46,6 +50,9 @@ func newModel(t *testing.T, options Options) *Model {
 	}
 	if options.Analyze == nil {
 		options.Analyze = stubAnalyze(fixtureResult("A video"), nil)
+	}
+	if options.StatePath == "" {
+		options.StatePath = filepath.Join(t.TempDir(), "queue.json")
 	}
 	model := New(options)
 	model.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
@@ -629,5 +636,156 @@ func TestMouseClickFocusesAQueueRow(t *testing.T) {
 	model.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, Y: y})
 	if model.focus != 1 || model.area != areaQueue {
 		t.Errorf("click on row 2 left focus=%d area=%v", model.focus, model.area)
+	}
+}
+
+// logText joins the log entries, which is what the assertions read.
+func (m *Model) logText() string {
+	parts := make([]string, len(m.logLines))
+	for index, entry := range m.logLines {
+		parts[index] = entry.text
+	}
+	return strings.Join(parts, "\n")
+}
+
+// lineContaining returns the single rendered line that mentions needle.
+func lineContaining(view, needle string) string {
+	for _, line := range strings.Split(view, "\n") {
+		if strings.Contains(line, needle) {
+			return line
+		}
+	}
+	return ""
+}
+
+func TestQueueRowCarriesItsOwnProgressBar(t *testing.T) {
+	model := newModel(t, Options{})
+	analyzedRow(t, model, "https://example.test/a")
+	snapshot := model.jobs[0]
+	snapshot.Status = format.Downloading
+	snapshot.Percent = 42
+	snapshot.Speed = "3.2MiB/s"
+	model.Update(managerMsg{job: snapshot})
+
+	view := model.View()
+	row := lineContaining(view, "A video")
+	if !strings.Contains(row, "42%") || !strings.Contains(row, "░") {
+		t.Errorf("the queue row has no progress bar: %q", row)
+	}
+	if strings.Contains(view, " download 42%") {
+		t.Error("the progress bar is still rendered as a separate line")
+	}
+	if !strings.Contains(lineContaining(view, "saves to"), "3.2MiB/s") {
+		t.Error("the focused row should report its speed")
+	}
+}
+
+func TestPanelsAreBorderedAndTheLogIsVertical(t *testing.T) {
+	model := newModel(t, Options{})
+	analyzedRow(t, model, "https://example.test/a")
+	press(model, "l")
+
+	view := model.View()
+	queueBox := lineContaining(view, "╭─ queue")
+	if queueBox == "" {
+		t.Fatalf("no queue box:\n%s", view)
+	}
+	if !strings.Contains(queueBox, "╭─ log") {
+		t.Errorf("the log is not a vertical panel beside the queue: %q", queueBox)
+	}
+	for _, want := range []string{"╭─ formats", "╮", "╯", "│"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("view is missing %q", want)
+		}
+	}
+	for _, line := range strings.Split(view, "\n") {
+		if width := ansi.StringWidth(line); width > 120 {
+			t.Errorf("line wider than the terminal (%d): %q", width, line)
+		}
+	}
+	if model.bodyWidth >= model.width {
+		t.Errorf("bodyWidth = %d, the log did not take a column", model.bodyWidth)
+	}
+}
+
+func TestQueueSurvivesARestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state", "queue.json")
+	first := newModel(t, Options{StatePath: path})
+	analyzedRow(t, first, "https://example.test/a")
+	first.jobs[0].VideoID, first.jobs[0].AudioID = "399", "140"
+	first.jobs[0].Title = "A video"
+	first.markDirty()
+	first.flushQueue()
+
+	second := newModel(t, Options{StatePath: path})
+	if len(second.jobs) != 1 {
+		t.Fatalf("restored rows = %d, want 1", len(second.jobs))
+	}
+	job := second.jobs[0]
+	if job.URL != "https://example.test/a" || job.Title != "A video" {
+		t.Errorf("row = %+v", job)
+	}
+	if job.VideoID != "399" || job.AudioID != "140" {
+		t.Errorf("selection = %q/%q", job.VideoID, job.AudioID)
+	}
+	if len(job.Formats) != len(fixtureFormats()) {
+		t.Errorf("formats = %d, want %d", len(job.Formats), len(fixtureFormats()))
+	}
+	if !strings.Contains(second.View(), "A video") {
+		t.Error("the restored row is not rendered")
+	}
+}
+
+func TestRestoredDownloadIsQueuedAgain(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "queue.json")
+	interrupted := []format.Job{{
+		UID: 5, URL: "https://example.test/a", Status: format.Downloading, Percent: 40,
+	}}
+	if err := store.New(path).Save(interrupted); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	model := newModel(t, Options{
+		StatePath: path,
+		Spawn: func(ctx context.Context, cmd, env []string) (ytdlp.Proc, error) {
+			return &yieldingProc{}, nil
+		},
+	})
+	if len(model.jobs) != 1 {
+		t.Fatalf("restored rows = %d, want 1", len(model.jobs))
+	}
+	if model.jobs[0].Status != format.Loaded {
+		t.Errorf("an interrupted download must come back queued, status = %q", model.jobs[0].Status)
+	}
+	if !strings.Contains(model.logText(), "resuming 1") {
+		t.Errorf("the interrupted download was not re-queued: %v", model.logLines)
+	}
+	model.manager.Wait()
+}
+
+func TestCorruptQueueFileDoesNotBlockStartup(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "queue.json")
+	if err := os.WriteFile(path, []byte("{nope"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	model := newModel(t, Options{StatePath: path})
+	if len(model.jobs) != 0 {
+		t.Errorf("rows = %d, want none", len(model.jobs))
+	}
+	if !strings.Contains(model.logText(), "unreadable") {
+		t.Errorf("no warning in the log: %v", model.logLines)
+	}
+}
+
+func TestQuittingFlushesTheQueue(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "queue.json")
+	model := newModel(t, Options{StatePath: path})
+	model.addURL("https://example.test/a")
+	press(model, "q")
+	if !model.quitting {
+		t.Fatal("q did not quit")
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("the queue was not flushed on quit: %v", err)
 	}
 }

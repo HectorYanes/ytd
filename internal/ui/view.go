@@ -24,11 +24,15 @@ var (
 	cursorOnStyle  = lipgloss.NewStyle().Background(lipgloss.Color("4")).Foreground(lipgloss.Color("0")).Bold(true)
 	cursorOffStyle = lipgloss.NewStyle().Background(lipgloss.Color("236")).Foreground(lipgloss.Color("15")).Bold(true)
 	selectionMark  = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Bold(true)
+	borderIdle     = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	borderFocus    = lipgloss.NewStyle().Foreground(lipgloss.Color("4")).Bold(true)
 )
 
 const (
 	logLinesShown = 6
-	queueMaxRows  = 6
+	queueMaxRows  = 8
+	// minLogWidth is the narrowest terminal that still fits a vertical log.
+	minLogWidth = 76
 )
 
 // kindStyle colours a stream by its kind, mirroring the Textual palette.
@@ -46,25 +50,19 @@ func kindStyle(kind format.Kind) lipgloss.Style {
 	return lipgloss.NewStyle()
 }
 
-// screen accumulates rendered lines so block renderers can report the exact
-// terminal rows they occupy to the mouse hit-test map.
-type screen struct {
-	lines []string
-}
-
-func (s *screen) add(text string) {
-	if text == "" {
-		return
+// contentWidth is the main column's width, excluding the vertical log panel.
+func (m *Model) contentWidth() int {
+	if m.bodyWidth > 0 {
+		return m.bodyWidth
 	}
-	s.lines = append(s.lines, strings.Split(text, "\n")...)
+	return m.width
 }
 
-func (s *screen) blank() { s.lines = append(s.lines, "") }
+// panelInner is the usable width inside a bordered panel.
+func (m *Model) panelInner() int { return max(8, m.contentWidth()-2) }
 
-func (s *screen) count() int { return len(s.lines) }
-
-// View renders the whole screen: a queue strip, the focused video's metadata,
-// and the format explorer that owns the remaining height.
+// View renders the whole screen: a header, a URL field, and a body split
+// between the queue/format explorer and, when open, a vertical log panel.
 func (m *Model) View() string {
 	if m.editor != nil {
 		return m.editorView()
@@ -72,104 +70,117 @@ func (m *Model) View() string {
 	if m.width <= 0 {
 		return ""
 	}
-	H := m.height
+	H, W := m.height, m.width
 
 	job := m.focusedJob()
-	progressLines := 0
-	if job != nil && job.Status == format.Downloading {
-		progressLines = 1
+	sideLog := m.showLog && W >= minLogWidth
+	logWidth := 0
+	if sideLog {
+		logWidth = clamp(W/3, 30, 46)
 	}
-	logLines := 0
-	if m.showLog {
-		logLines = min(len(m.logLines), logLinesShown) + 1
+	m.bodyWidth = max(24, W-logWidth)
+
+	// Header (1) + URL box (3) + footer (1) are fixed chrome.
+	bodyH := max(4, H-5)
+	bottomLog := 0
+	if m.showLog && !sideLog {
+		bottomLog = min(len(m.logLines), logLinesShown) + 1
 	}
+	if H < 22 {
+		bottomLog = 0
+	}
+
 	reportLines := m.reportLineBudget(job)
+	slots := true
 
-	// Fixed chrome: header, url, queue title, queue column header, meta,
-	// filters, formats title, slots, footer.
-	const fixed = 9
-	const spacer = 1
-	urlGap := 0
-	if H >= 26 {
-		urlGap = 1
-	}
-	budget := H - fixed - reportLines - logLines - progressLines - spacer - urlGap
-
-	queueRows := 0
-	if len(m.jobs) == 0 {
-		queueRows = 1 // placeholder line
-	} else {
-		queueRows = min(len(m.jobs), queueMaxRows)
-		if H < 34 {
-			queueRows = min(queueRows, 4)
+	// Rows spent on chrome inside the main column: meta, filter, both boxes'
+	// borders and column headers, plus the optional slots line.
+	chrome := func() int {
+		count := 8 // meta + filter + queue box (3) + formats box (3)
+		if slots {
+			count++
 		}
-		if H < 28 {
-			queueRows = min(queueRows, 2)
-		}
+		return count + reportLines + bottomLog
 	}
-	if budget < queueRows+2 {
-		queueRows = max(0, budget-2)
+	dataRows := bodyH - chrome()
+	if dataRows < 2 && !sideLog && bottomLog > 0 {
+		bottomLog = 0
+		dataRows = bodyH - chrome()
 	}
-	formatRows := budget - queueRows
-	if formatRows < 2 {
-		need := 2 - formatRows
-		if queueRows >= need {
-			queueRows -= need
-			formatRows = 2
-		} else {
-			formatRows = max(0, formatRows+queueRows)
-			queueRows = 0
-		}
+	if dataRows < 2 && reportLines > 0 {
+		reportLines = 0
+		dataRows = bodyH - chrome()
 	}
-	if formatRows < 0 {
-		formatRows = 0
+	if dataRows < 2 && slots {
+		slots = false
+		dataRows = bodyH - chrome()
+	}
+	dataRows = max(2, dataRows)
+
+	queueWanted := len(m.jobs)
+	if queueWanted == 0 {
+		queueWanted = 1 // the empty placeholder still needs one row
+	}
+	queueRows := min(queueWanted, queueMaxRows)
+	queueRows = min(queueRows, max(1, dataRows-1))
+	formatRows := max(1, dataRows-queueRows)
+	if leftover := bodyH - chrome() - queueRows - formatRows; leftover > 0 {
+		formatRows += leftover
 	}
 
-	s := &screen{}
-	s.add(m.headerView())
+	lines := make([]string, 0, H)
+	lines = append(lines, m.headerView())
+	lines = append(lines, m.urlBox()...)
+	m.hit.url = 2
+	bodyTop := len(lines)
 
-	urlTop := s.count()
-	s.add(m.urlView())
-	if urlGap > 0 {
-		s.blank()
-	}
+	main := make([]string, 0, bodyH)
+	queueBody, queueWindow := m.queuePanel(queueRows)
+	queueTop := len(main)
+	main = append(main, boxLines(m.panelTitle("queue", len(m.jobs)), queueBody, m.contentWidth(), m.area == areaQueue)...)
+	m.hit.queue = panelHit{top: bodyTop + queueTop + 2, rows: queueWindow.rows, start: queueWindow.start}
 
-	queueTitleTop := s.count()
-	queueBlock, queueHit := m.queueBlock(queueRows)
-	s.add(queueBlock)
-	queueHit.top += queueTitleTop
-	m.hit.queue = queueHit
-
-	s.add(m.metaView())
+	main = append(main, m.metaView())
 	if reportLines > 0 {
-		s.add(m.reportView(reportLines))
+		main = append(main, m.reportLines(reportLines)...)
 	}
-	filterTop := s.count()
-	s.add(m.filterView())
-	m.hit.filter = filterTop
-	s.blank()
+	m.hit.filter = bodyTop + len(main)
+	main = append(main, m.filterView())
 
-	formatTitleTop := s.count()
-	formatBlock, formatHit := m.formatsBlock(formatRows)
-	s.add(formatBlock)
-	formatHit.top += formatTitleTop + 1
-	m.hit.formats = formatHit
+	formatBody, formatWindow := m.formatsPanel(formatRows)
+	formatTop := len(main)
+	main = append(main, boxLines(m.panelTitle("formats", len(m.visible)), formatBody, m.contentWidth(), m.area == areaFormats)...)
+	m.hit.formats = panelHit{top: bodyTop + formatTop + 2, rows: formatWindow.rows, start: formatWindow.start}
 
-	s.add(m.slotsView())
-	if progressLines > 0 {
-		s.add(m.progressView())
+	if slots {
+		main = append(main, m.slotsView())
 	}
-	if m.showLog {
-		s.add(m.logView())
+	if bottomLog > 0 {
+		main = append(main, m.logBlock(bottomLog)...)
 	}
-	s.add(m.footerView())
+	for len(main) < bodyH {
+		main = append(main, "")
+	}
+	if len(main) > bodyH {
+		main = main[:bodyH]
+	}
 
-	// Never let the frame exceed the terminal: the footer must stay visible.
-	if len(s.lines) > H && H > 0 {
-		s.lines = s.lines[:H]
+	if sideLog {
+		entries := m.logEntries(max(0, bodyH-2), max(8, logWidth-2))
+		for len(entries) < bodyH-2 {
+			entries = append(entries, "")
+		}
+		box := boxLines("log", entries, logWidth, false)
+		lines = append(lines, joinColumns(main, m.contentWidth(), box, bodyH)...)
+	} else {
+		lines = append(lines, main...)
 	}
-	m.hit.url = urlTop
-	return strings.Join(s.lines, "\n")
+	lines = append(lines, m.footerView())
+
+	if len(lines) > H && H > 0 {
+		lines = lines[:H]
+	}
+	return strings.Join(lines, "\n")
 }
 
 // reportLineBudget decides how many availability lines fit on this height.
@@ -190,6 +201,10 @@ func (m *Model) reportLineBudget(job *format.Job) int {
 	return min(total, 4)
 }
 
+// ---------------------------------------------------------------------------
+// frame pieces
+// ---------------------------------------------------------------------------
+
 func (m *Model) headerView() string {
 	left := " ytd — yt-dlp queue"
 	right := "out " + m.outdir + " "
@@ -205,6 +220,10 @@ func (m *Model) headerView() string {
 	return headerStyle.Render(line)
 }
 
+func (m *Model) urlBox() []string {
+	return boxLines("url", []string{m.urlView()}, m.width, m.area == areaURL)
+}
+
 func (m *Model) urlView() string {
 	var line string
 	switch {
@@ -215,65 +234,160 @@ func (m *Model) urlView() string {
 	default:
 		line = "› " + m.urlInput.Value()
 	}
-	line = truncateANSI(line, m.width)
+	line = truncateANSI(line, max(8, m.width-2))
 	if m.area == areaURL {
-		return padRight(line, m.width)
+		return padRight(line, max(8, m.width-2))
 	}
 	return dimStyle.Render(line)
 }
 
-// queueBlock renders the compact queue strip: a title badge and up to rows
-// rows, scrolled so the focused job stays visible.
-func (m *Model) queueBlock(rows int) (string, panelHit) {
-	title := m.sectionTitle("queue", len(m.jobs))
-	lines := []string{title}
-	hit := panelHit{top: 1, start: 0}
-	if rows <= 0 {
-		return strings.Join(lines, "\n"), hit
+// panelTitle is the label drawn in a panel's top border.
+func (m *Model) panelTitle(name string, count int) string {
+	if count <= 0 {
+		return name
 	}
+	return fmt.Sprintf("%s · %d", name, count)
+}
+
+// boxLines draws a rounded border around body with the title in the top edge.
+// Every returned line is exactly width columns, which keeps the columns aligned
+// and the mouse hit-test math exact.
+func boxLines(title string, body []string, width int, focused bool) []string {
+	width = max(6, width)
+	inner := width - 2
+	style := borderIdle
+	if focused {
+		style = borderFocus
+	}
+	title = truncate(title, max(1, width-6))
+	prefix := "╭─ " + title + " "
+	fill := max(0, width-ansi.StringWidth(prefix)-1)
+	out := make([]string, 0, len(body)+2)
+	out = append(out, style.Render(prefix+strings.Repeat("─", fill)+"╮"))
+	for _, line := range body {
+		out = append(out, style.Render("│")+padRight(truncateANSI(line, inner), inner)+style.Render("│"))
+	}
+	out = append(out, style.Render("╰"+strings.Repeat("─", inner)+"╯"))
+	return out
+}
+
+// joinColumns places the log box to the right of the main column, line by line.
+func joinColumns(left []string, leftWidth int, right []string, height int) []string {
+	out := make([]string, 0, height)
+	for index := 0; index < height; index++ {
+		line := ""
+		if index < len(left) {
+			line = left[index]
+		}
+		next := ""
+		if index < len(right) {
+			next = right[index]
+		}
+		out = append(out, padRight(line, leftWidth)+next)
+	}
+	return out
+}
+
+// ---------------------------------------------------------------------------
+// queue
+// ---------------------------------------------------------------------------
+
+type queueColumn struct {
+	key   string
+	title string
+	width int
+}
+
+// queueColumns picks the columns that fit the main column, giving the leftover
+// room to the title.
+func queueColumns(width int) []queueColumn {
+	index := queueColumn{"index", "#", 3}
+	title := queueColumn{"title", "título", 0}
+	quality := queueColumn{"quality", "calidad", 13}
+	audio := queueColumn{"audio", "audio", 13}
+	status := queueColumn{"status", "estado", 15}
+	size := queueColumn{"size", "tamaño", 9}
+
+	cols := []queueColumn{index, title, quality, audio, status, size}
+	switch {
+	case width < 62:
+		cols = []queueColumn{index, title, status, size}
+	case width < 80:
+		quality.width, audio.width = 11, 11
+	}
+	fixed := len(cols) - 1
+	for _, column := range cols {
+		if column.key != "title" {
+			fixed += column.width
+		}
+	}
+	for position := range cols {
+		if cols[position].key == "title" {
+			cols[position].width = clamp(width-fixed, 10, 90)
+		}
+	}
+	return cols
+}
+
+func queueHeader(cols []queueColumn) string {
+	widths := make([]int, len(cols))
+	cells := make([]string, len(cols))
+	for index, column := range cols {
+		widths[index] = column.width
+		cells[index] = column.title
+	}
+	return joinCells(widths, cells)
+}
+
+// queuePanel renders the column header plus up to rows rows, scrolled so the
+// focused job stays visible.
+func (m *Model) queuePanel(rows int) ([]string, panelHit) {
+	cols := queueColumns(m.panelInner())
+	body := []string{dimStyle.Render(queueHeader(cols))}
+	window := panelHit{}
+	if rows <= 0 {
+		return body, window
+	}
+	window.rows = rows
 	start := 0
 	if m.focus >= rows {
 		start = m.focus - rows + 1
 	}
-	hit.start = start
-	hit.rows = rows
-
-	widths := queueWidths(m.width)
-	lines = append(lines, dimStyle.Render(queueHeader(widths)))
-	for i := 0; i < rows; i++ {
-		index := start + i
+	window.start = start
+	for offset := 0; offset < rows; offset++ {
+		index := start + offset
 		if index >= len(m.jobs) {
-			if i == 0 && len(m.jobs) == 0 {
-				lines = append(lines, dimStyle.Render("  (empty) paste a URL above"))
+			if offset == 0 && len(m.jobs) == 0 {
+				body = append(body, dimStyle.Render("  (empty) paste a URL above"))
 			} else {
-				lines = append(lines, "")
+				body = append(body, "")
 			}
 			continue
 		}
-		lines = append(lines, m.queueRow(m.jobs[index], index, index == m.focus))
+		body = append(body, m.queueRow(cols, m.jobs[index], index, index == m.focus))
 	}
-	return strings.Join(lines, "\n"), hit
+	return body, window
 }
 
-func queueWidths(width int) []int {
-	size, status, audio, quality := 9, 14, 15, 15
-	title := clamp(width-(3+quality+audio+status+size)-5, 12, 90)
-	return []int{3, title, quality, audio, status, size}
-}
-
-func queueHeader(widths []int) string {
-	return joinCells(widths, []string{"#", "título", "calidad", "audio", "estado", "tamaño"})
-}
-
-func (m *Model) queueRow(job format.Job, index int, focused bool) string {
-	widths := queueWidths(m.width)
-	cells := []string{
-		fmt.Sprintf("%d", index+1),
-		job.Label(0),
-		job.QualityLabel(),
-		job.AudioLabel(),
-		format.StatusLabel(job.Status, job.Percent, job.Error),
-		job.SizeLabel(),
+func (m *Model) queueRow(cols []queueColumn, job format.Job, index int, focused bool) string {
+	cells := make([]string, len(cols))
+	widths := make([]int, len(cols))
+	for position, column := range cols {
+		widths[position] = column.width
+		switch column.key {
+		case "index":
+			cells[position] = fmt.Sprintf("%d", index+1)
+		case "title":
+			cells[position] = job.Label(0)
+		case "quality":
+			cells[position] = job.QualityLabel()
+		case "audio":
+			cells[position] = job.AudioLabel()
+		case "status":
+			cells[position] = statusCell(job, column.width)
+		case "size":
+			cells[position] = job.SizeLabel()
+		}
 	}
 	raw := joinCells(widths, cells)
 	if focused {
@@ -281,37 +395,47 @@ func (m *Model) queueRow(job format.Job, index int, focused bool) string {
 		if m.area == areaQueue {
 			style = cursorOnStyle
 		}
-		return style.Render(padRight(raw, m.width))
+		return style.Render(padRight(raw, m.panelInner()))
 	}
-	parts := make([]string, len(cells))
-	for i, cell := range cells {
-		text := padRight(truncate(cell, widths[i]), widths[i])
-		switch i {
-		case 0:
+	parts := make([]string, len(cols))
+	for position, column := range cols {
+		text := padRight(truncate(cells[position], widths[position]), widths[position])
+		switch column.key {
+		case "index":
 			text = dimStyle.Render(text)
-		case 4:
+		case "status":
 			text = statusStyles[job.Status].Render(text)
 		}
-		parts[i] = text
+		parts[position] = text
 	}
-	return truncateANSI(strings.Join(parts, " "), m.width)
+	return truncateANSI(strings.Join(parts, " "), m.panelInner())
 }
 
-func (m *Model) sectionTitle(name string, count int) string {
-	badge := titleStyle.Render(" " + name + " ")
-	rest := ""
-	if count > 0 {
-		rest = dimStyle.Render(fmt.Sprintf("  %d", count))
+// statusCell is the estado column: a progress bar while the row downloads and
+// the plain status label otherwise.
+func statusCell(job format.Job, width int) string {
+	if job.Status != format.Downloading {
+		return format.StatusLabel(job.Status, job.Percent, job.Error)
 	}
-	return badge + rest
+	percent := clamp(int(job.Percent+0.5), 0, 100)
+	barWidth := max(4, width-6)
+	filled := barWidth * percent / 100
+	return strings.Repeat("█", filled) +
+		strings.Repeat("░", barWidth-filled) +
+		fmt.Sprintf(" %3d%%", percent)
 }
+
+// ---------------------------------------------------------------------------
+// meta, report, filter
+// ---------------------------------------------------------------------------
 
 func (m *Model) metaView() string {
 	job := m.focusedJob()
 	if job == nil {
 		return dimStyle.Render(" no video loaded")
 	}
-	title := titleStyle.Render(job.Label(max(20, m.width/2)))
+	width := m.contentWidth()
+	title := titleStyle.Render(job.Label(max(20, width/2)))
 	if !job.Analyzed() {
 		return " " + title
 	}
@@ -323,25 +447,32 @@ func (m *Model) metaView() string {
 		bits = append(bits, format.HumanDuration(job.Duration))
 	}
 	bits = append(bits, fmt.Sprintf("%d formats", len(job.Formats)))
+	if job.Status == format.Downloading {
+		bits = append(bits, fmt.Sprintf("%.0f%%", job.Percent))
+		if job.Speed != "" {
+			bits = append(bits, job.Speed)
+		}
+		if job.ETA != "" {
+			bits = append(bits, "eta "+job.ETA)
+		}
+	}
 	bits = append(bits, "saves to "+m.outdir)
-	return truncateANSI(" "+strings.Join(bits, dimStyle.Render("  ·  ")), m.width)
+	return truncateANSI(" "+strings.Join(bits, dimStyle.Render("  ·  ")), width)
 }
 
-func (m *Model) reportView(limit int) string {
+func (m *Model) reportLines(limit int) []string {
 	job := m.focusedJob()
 	if job == nil {
-		return ""
+		return nil
 	}
 	report := format.AvailabilityReport(job.Formats, m.mergeFormat)
-	if len(report) == 0 {
-		return ""
-	}
 	lines := make([]string, 0, min(len(report), limit))
 	for _, line := range report {
 		if len(lines) >= limit {
 			break
 		}
-		text := "  " + line.Text
+		width := m.contentWidth()
+		text := truncateANSI("  "+line.Text, width)
 		switch line.Kind {
 		case format.LineWarning:
 			text = warnStyle.Render(text)
@@ -352,7 +483,7 @@ func (m *Model) reportView(limit int) string {
 		}
 		lines = append(lines, text)
 	}
-	return strings.Join(lines, "\n")
+	return lines
 }
 
 func (m *Model) filterView() string {
@@ -367,7 +498,7 @@ func (m *Model) filterView() string {
 	tags := fmt.Sprintf("kind:%s  ext:%s  sized:%s  hls:%s  compat:%s",
 		kindOptions[m.kindIdx], containerOptions[m.contIdx],
 		onOff(m.onlySize), onOff(!m.hideHLS), onOff(m.compatOnly))
-	return truncateANSI(" "+left+"    "+dimStyle.Render(tags), m.width)
+	return truncateANSI(" "+left+"    "+dimStyle.Render(tags), m.contentWidth())
 }
 
 func onOff(on bool) string {
@@ -376,6 +507,10 @@ func onOff(on bool) string {
 	}
 	return dimStyle.Render("off")
 }
+
+// ---------------------------------------------------------------------------
+// format explorer
+// ---------------------------------------------------------------------------
 
 // colSpec is one column of the format explorer.
 type colSpec struct {
@@ -403,13 +538,13 @@ func formatColumns(width int) []colSpec {
 	acodec := colSpec{"acodec", "acodec", 9}
 	hdr := colSpec{"hdr", "hdr", 6}
 	fps := colSpec{"fps", "fps", 4}
-	br := colSpec{"br", "br", 8}
-	size := colSpec{"size", "size", 9}
+	br := colSpec{"br", "br", 7}
+	size := colSpec{"size", "size", 8}
 	ext := colSpec{"ext", "ext", 5}
 	src := colSpec{"src", "src", 5}
 	note := colSpec{"note", "note", 0}
 
-	if width >= 92 {
+	if width >= 88 {
 		cols := []colSpec{sel, id, kind, res, vcodec, acodec, hdr, fps, br, size, ext, src}
 		if leftover := width - colsWidth(cols) - 1; leftover >= 10 {
 			note.width = leftover
@@ -417,41 +552,43 @@ func formatColumns(width int) []colSpec {
 		}
 		return cols
 	}
-	if width >= 84 {
+	if width >= 78 {
 		return []colSpec{sel, id, kind, res, vcodec, acodec, hdr, fps, br, size, ext}
 	}
-	if width >= 72 {
+	if width >= 64 {
 		return []colSpec{sel, id, kind, res, vcodec, acodec, br, size, ext}
 	}
 	return []colSpec{sel, id, kind, res, vcodec, acodec, size}
 }
 
-func (m *Model) formatsBlock(rows int) (string, panelHit) {
-	cols := formatColumns(m.width)
-	lines := []string{dimStyle.Render(formatHeader(cols))}
-	hit := panelHit{top: 1, start: 0}
+// formatsPanel renders the column header plus up to rows rows, scrolled so the
+// cursor stays visible.
+func (m *Model) formatsPanel(rows int) ([]string, panelHit) {
+	cols := formatColumns(m.panelInner())
+	body := []string{dimStyle.Render(formatHeader(cols))}
+	window := panelHit{}
 	if rows <= 0 {
-		return strings.Join(lines, "\n"), hit
+		return body, window
 	}
-	hit.rows = rows
+	window.rows = rows
 	start := 0
 	if m.fmtCursor >= rows {
 		start = m.fmtCursor - rows + 1
 	}
-	hit.start = start
-	for i := 0; i < rows; i++ {
-		index := start + i
+	window.start = start
+	for offset := 0; offset < rows; offset++ {
+		index := start + offset
 		if index >= len(m.visible) {
-			if i == 0 && len(m.visible) == 0 {
-				lines = append(lines, dimStyle.Render("  (no formats match — adjust the filter)"))
+			if offset == 0 && len(m.visible) == 0 {
+				body = append(body, dimStyle.Render("  (no formats match — adjust the filter)"))
 			} else {
-				lines = append(lines, "")
+				body = append(body, "")
 			}
 			continue
 		}
-		lines = append(lines, m.formatRow(cols, m.visible[index], index == m.fmtCursor))
+		body = append(body, m.formatRow(cols, m.visible[index], index == m.fmtCursor))
 	}
-	return strings.Join(lines, "\n"), hit
+	return body, window
 }
 
 func formatHeader(cols []colSpec) string {
@@ -476,7 +613,7 @@ func (m *Model) formatRow(cols []colSpec, candidate format.Fmt, cursor bool) str
 		if m.area == areaFormats {
 			style = cursorOnStyle
 		}
-		return style.Render(padRight(plain, m.width))
+		return style.Render(padRight(plain, m.panelInner()))
 	}
 	parts := make([]string, len(cols))
 	for i, c := range cols {
@@ -486,7 +623,7 @@ func (m *Model) formatRow(cols []colSpec, candidate format.Fmt, cursor bool) str
 		}
 		parts[i] = text
 	}
-	return truncateANSI(strings.Join(parts, " "), m.width)
+	return truncateANSI(strings.Join(parts, " "), m.panelInner())
 }
 
 func (m *Model) formatValues(candidate format.Fmt) map[string]string {
@@ -560,10 +697,14 @@ func fpsLabel(candidate format.Fmt) string {
 	return "—"
 }
 
+// ---------------------------------------------------------------------------
+// slots, log and footer
+// ---------------------------------------------------------------------------
+
 func (m *Model) slotsView() string {
 	job := m.focusedJob()
 	if job == nil {
-		return slotStyle.Render(truncate("no row selected", max(10, m.width-2)))
+		return slotStyle.Render(truncate("no row selected", max(10, m.contentWidth()-2)))
 	}
 	describe := func(candidate *format.Fmt) string {
 		if candidate == nil {
@@ -581,43 +722,21 @@ func (m *Model) slotsView() string {
 	if video := job.Video(); video != nil && video.Kind == format.Video && job.AudioID == "" {
 		text += "  ⚠ no audio: file will be silent"
 	}
-	return slotStyle.Render(truncate(text, max(10, m.width-2)))
+	return slotStyle.Render(truncate(text, max(10, m.contentWidth()-2)))
 }
 
-func (m *Model) progressView() string {
-	job := m.focusedJob()
-	if job == nil || job.Status != format.Downloading {
-		return ""
+// logEntries renders the last limit log lines at the given width.
+func (m *Model) logEntries(limit, width int) []string {
+	if limit <= 0 {
+		return nil
 	}
-	percent := job.Percent
-	if percent < 0 {
-		percent = 0
+	entries := m.logLines
+	if len(entries) > limit {
+		entries = entries[len(entries)-limit:]
 	}
-	if percent > 100 {
-		percent = 100
-	}
-	barWidth := clamp(m.width-40, 10, 60)
-	filled := int(percent / 100 * float64(barWidth))
-	bar := strings.Repeat("█", filled) + strings.Repeat("░", barWidth-filled)
-	text := fmt.Sprintf(" download %3.0f%% [%s]", percent, bar)
-	if job.Speed != "" {
-		text += "  " + job.Speed
-	}
-	if job.ETA != "" {
-		text += "  eta " + job.ETA
-	}
-	return progressStyle.Render(truncate(text, m.width))
-}
-
-func (m *Model) logView() string {
-	lines := m.logLines
-	if len(lines) > logLinesShown {
-		lines = lines[len(lines)-logLinesShown:]
-	}
-	rendered := make([]string, 0, len(lines)+1)
-	rendered = append(rendered, dimStyle.Render(" log"))
-	for _, entry := range lines {
-		text := truncate(entry.text, max(10, m.width-4))
+	out := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		text := truncate(entry.text, max(8, width))
 		switch entry.level {
 		case "warn":
 			text = warnStyle.Render(text)
@@ -628,9 +747,22 @@ func (m *Model) logView() string {
 		default:
 			text = dimStyle.Render(text)
 		}
-		rendered = append(rendered, "  "+text)
+		out = append(out, text)
 	}
-	return strings.Join(rendered, "\n")
+	return out
+}
+
+// logBlock is the fallback for terminals too narrow for a vertical log.
+func (m *Model) logBlock(limit int) []string {
+	lines := []string{dimStyle.Render(" log")}
+	entries := min(limit-1, logLinesShown)
+	if entries <= 0 {
+		return lines
+	}
+	for _, entry := range m.logEntries(entries, m.panelInner()-2) {
+		lines = append(lines, "  "+entry)
+	}
+	return lines
 }
 
 func (m *Model) footerView() string {

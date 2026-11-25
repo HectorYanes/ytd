@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -18,7 +19,10 @@ func TestProgramRunsAgainstYouTube(t *testing.T) {
 	if os.Getenv("YTD_E2E") == "" {
 		t.Skip("set YTD_E2E=1 to drive the real program")
 	}
-	model := New(Options{StartURLs: []string{"https://www.youtube.com/watch?v=aqz-KE-bpKQ"}})
+	model := New(Options{
+		StartURLs: []string{"https://www.youtube.com/watch?v=aqz-KE-bpKQ"},
+		StatePath: filepath.Join(t.TempDir(), "queue.json"),
+	})
 	reader, writer := io.Pipe()
 	var screen bytes.Buffer
 

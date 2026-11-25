@@ -30,6 +30,25 @@ empaqueta: se detecta, se reporta en `--check` y la UI avisa al arrancar.
   usuario, literal: "En la tui no hay una manera comoda de desplazarze, has un
   rediseño completo, mas olgado, mas comodo, mas como el de python". Decisión
   del fork, literal: "A" (explorador estilo Python, sin popup forzado).
+- **S6**. Segunda ronda de layout y estado, pedido del usuario, literal: "has
+  solo push, luego de eso quiero q el log en ves de una barra en la parte de
+  abajo sea vertical la barra de log, y q la barra de progreso del video se
+  muestre en la misma cola, ademas, en python esto tenia persistencia, aca no
+  hay nada, otra cosa, ponle bordes a los containers para ver bien las
+  divisiones".
+  - **S6.1**. El log es un panel vertical a la derecha del cuerpo (borde
+    propio), no una tira al pie. En terminales de menos de 76 columnas cae al
+    bloque inferior como fallback.
+  - **S6.2**. La fila de la cola muestra su propia barra de progreso en la
+    columna `estado` mientras descarga (`███░░ 42%`), y la línea meta del video
+    enfocado suma `%`, velocidad y ETA. No hay línea de progreso separada.
+  - **S6.3**. Persistencia de la cola con paridad Python (`ytd_tui/store.py`):
+    un JSON por usuario (`XDG_STATE_HOME`/`LOCALAPPDATA`/`Application Support`
+    → `ytd/queue.json`), escritura atómica y defensiva, y las filas que estaban
+    descargando vuelven como `cargada` y se reencolan al arrancar.
+  - **S6.4**. Todos los paneles (URL, cola, formatos, log) llevan borde redondeado
+    con el título en el borde superior; el borde se resalta cuando el panel tiene
+    el foco.
 
 ## Tasks
 
@@ -42,6 +61,8 @@ empaqueta: se detecta, se reporta en `--check` y la UI avisa al arrancar.
 | T5 | S1, S2 | inline | done — `cmd/ytd`: `-o`, `-j`, `--check`, `--update`, `--version`, URLs | 4b1f2ff |
 | T6 | S1, S3 | inline | done — árbol Python borrado, installers y README para el binario único | este slice |
 | T7 | S5 | inline | done — `internal/ui/view.go` rediseñado (barra tipo Textual, explorador de formatos dominante, colores por kind, slots y progreso) + navegación URL→cola→formatos→filtro, rueda/clic de mouse, 7 tests nuevos | 454d74c |
+| T8 | S6.3 | inline | done — `internal/store` (state dir por OS, JSON atómico, dedupe/UIDs, resume de descargas interrumpidas) + cableado en `ui.New`/`Init` con flush cada 2 s + 8 tests | este slice |
+| T9 | S6.1, S6.2, S6.4 | inline | done — caja con borde y título para URL/cola/formatos/log, log vertical de ancho completo del cuerpo, progreso en la celda `estado` y %/velocidad/ETA en la meta + 4 tests | este slice |
 
 ## Log
 
@@ -99,3 +120,15 @@ empaqueta: se detecta, se reporta en `--check` y la UI avisa al arrancar.
   --committed-only` devuelve `risk: medium`, `review_due: false`
   (`under_budget`). El probe real `YTD_E2E=1 TestProgramRunsAgainstYouTube`
   vuelve a pasar con el layout nuevo (59 s, análisis real y `q`).
+- **L15** (decision): la persistencia no se inventa: se porta `ytd_tui/store.py`
+  de la rama Python (`feat/job-queue`) con el mismo esquema JSON (`version: 1`,
+  `jobs[]` con `uid`, `url`, `title`, `uploader`, `duration`, `formats`,
+  `video_id`, `audio_id`, `status`, `percent`, `speed`, `eta`, `size`, `error`,
+  `path`). Las lecturas son defensivas: archivo corrupto o ajeno ⇒ cola vacía y
+  un aviso en el log, nunca un aborto. Los `Downloading` vuelven como `cargada`
+  y se reencolan.
+- **L16** (evidence): `go test -count=1 ./...` verde (14 tests nuevos: 8 de
+  `internal/store`, 6 de UI entre progreso, bordes/log vertical, persistencia,
+  resume, archivo corrupto y flush al salir), `go vet` limpio, `gofmt` limpio y
+  `YTD_E2E=1 TestProgramRunsAgainstYouTube` pasa en 7.2 s con el layout de
+  bordes y el log vertical.

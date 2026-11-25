@@ -141,6 +141,7 @@ func (m *Model) applyEditor() {
 	if video := job.Video(); video != nil && video.Kind == format.Muxed {
 		job.AudioID = ""
 	}
+	m.markDirty()
 	m.refreshDerived()
 }
 
