@@ -24,6 +24,13 @@ Branch: `go-migration`. Delivery: `single-pr`. Test runner: `go test ./...`
 Assumption (flagged): ffmpeg sigue siendo un requisito del sistema. No se
 empaqueta: se detecta, se reporta en `--check` y la UI avisa al arrancar.
 
+- **S5**. Rediseño completo de la TUI: más holgado, cómodo y parecido a Python.
+  El explorador de formatos es la superficie principal y se navega con flechas,
+  PageUp/PageDown y mouse (rueda y clic), sin popup obligatorio. El pedido del
+  usuario, literal: "En la tui no hay una manera comoda de desplazarze, has un
+  rediseño completo, mas olgado, mas comodo, mas como el de python". Decisión
+  del fork, literal: "A" (explorador estilo Python, sin popup forzado).
+
 ## Tasks
 
 | id | specs | route | status | commit |
@@ -34,6 +41,7 @@ empaqueta: se detecta, se reporta en `--check` y la UI avisa al arrancar.
 | T4 | S2 | inline | done — editor modal (video/audio, tab, `i`), `c` compat, panel de disponibilidad | 4b1f2ff |
 | T5 | S1, S2 | inline | done — `cmd/ytd`: `-o`, `-j`, `--check`, `--update`, `--version`, URLs | 4b1f2ff |
 | T6 | S1, S3 | inline | done — árbol Python borrado, installers y README para el binario único | este slice |
+| T7 | S5 | inline | done — `internal/ui/view.go` rediseñado (barra tipo Textual, explorador de formatos dominante, colores por kind, slots y progreso) + navegación URL→cola→formatos→filtro, rueda/clic de mouse, 7 tests nuevos | sin commit |
 
 ## Log
 
@@ -74,3 +82,15 @@ empaqueta: se detecta, se reporta en `--check` y la UI avisa al arrancar.
   site-packages.
 - **L10** (pending): `install.ps1` sigue sin probarse en Windows real (no hay
   PowerShell en esta máquina); el binario windows/amd64 sí compila.
+- **L11** (diagnosis): el error `The page needs to be reloaded` del video
+  `jTWb-RIdN-I` era ambiental, no del código: el yt-dlp del sistema
+  (2026.09.16) fallaba el challenge JS con deno. Con yt-dlp 2026.11.24 el mismo
+  URL devuelve 32 formatos y el análisis Go funciona sin cambios.
+- **L12** (user request, verbatim): "En la tui no hay una manera comoda de
+  desplazarze, has un rediseño completo, mas olgado, mas comodo, mas como el de
+  python".
+- **L13** (decision, verbatim answer): "A" — explorador estilo Python: la tabla
+  de formatos es la superficie, sin modal obligatorio; `v`/`a` eligen, sin
+  elección va `best`. Implementado: paneles URL→cola→formatos→filtro con `tab`,
+  flechas y PageUp/Down en formatos, rueda y clic de mouse, y `enter` en la
+  barra de URL lleva directo al explorador.

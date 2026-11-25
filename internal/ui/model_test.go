@@ -66,6 +66,10 @@ func keyMsg(name string) tea.KeyMsg {
 		return tea.KeyMsg{Type: tea.KeyDown}
 	case "up":
 		return tea.KeyMsg{Type: tea.KeyUp}
+	case "left":
+		return tea.KeyMsg{Type: tea.KeyLeft}
+	case "right":
+		return tea.KeyMsg{Type: tea.KeyRight}
 	case "delete":
 		return tea.KeyMsg{Type: tea.KeyDelete}
 	case "pgdown":
@@ -531,5 +535,99 @@ func TestMissingJSRuntimeIsReported(t *testing.T) {
 		if !strings.Contains(model.View(), "JavaScript runtime") {
 			t.Error("the view should warn about the missing runtime")
 		}
+	}
+}
+
+func TestSubmittingAURLMovesToTheFormatExplorer(t *testing.T) {
+	model := newModel(t, Options{})
+	model.urlInput.SetValue("https://example.test/a")
+	press(model, "enter")
+	if model.area != areaFormats {
+		t.Errorf("after submitting a URL the explorer should own the keys, area = %v", model.area)
+	}
+}
+
+func TestTabCyclesThroughEveryPane(t *testing.T) {
+	model := newModel(t, Options{})
+	if model.area != areaURL {
+		t.Fatalf("initial area = %v, want the URL bar", model.area)
+	}
+	order := []area{areaQueue, areaFormats, areaFilter, areaURL}
+	for _, want := range order {
+		press(model, "tab")
+		if model.area != want {
+			t.Fatalf("tab moved to %v, want %v", model.area, want)
+		}
+	}
+}
+
+func TestFormatExplorerArrowNavigation(t *testing.T) {
+	model := newModel(t, Options{})
+	analyzedRow(t, model, "https://example.test/a")
+	press(model, "right") // drill from the queue into the explorer
+	if model.area != areaFormats {
+		t.Fatalf("area = %v, want the format explorer", model.area)
+	}
+	if model.fmtCursor != 0 {
+		t.Fatalf("cursor = %d, want 0", model.fmtCursor)
+	}
+	press(model, "down")
+	if model.fmtCursor != 1 {
+		t.Errorf("down did not move the format cursor: %d", model.fmtCursor)
+	}
+	press(model, "down")
+	press(model, "up")
+	if model.fmtCursor != 1 {
+		t.Errorf("up did not move the format cursor back: %d", model.fmtCursor)
+	}
+	press(model, "esc")
+	if model.area != areaQueue {
+		t.Errorf("esc should leave the explorer, area = %v", model.area)
+	}
+}
+
+func TestMouseWheelScrollsTheFormatExplorer(t *testing.T) {
+	model := newModel(t, Options{})
+	analyzedRow(t, model, "https://example.test/a")
+	model.View() // fills the hit-test map
+	if model.hit.formats.rows == 0 {
+		t.Fatal("the format panel was not laid out")
+	}
+	y := model.hit.formats.top
+	model.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonWheelDown, Y: y})
+	if model.fmtCursor != 3 {
+		t.Errorf("wheel down did not scroll the explorer: cursor = %d", model.fmtCursor)
+	}
+	model.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonWheelUp, Y: y})
+	if model.fmtCursor != 0 {
+		t.Errorf("wheel up did not scroll back: cursor = %d", model.fmtCursor)
+	}
+}
+
+func TestMouseClickSelectsAFormatRow(t *testing.T) {
+	model := newModel(t, Options{})
+	analyzedRow(t, model, "https://example.test/a")
+	model.View()
+	y := model.hit.formats.top + 3
+	model.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, Y: y})
+	if model.area != areaFormats {
+		t.Errorf("clicking a format row should focus the explorer, area = %v", model.area)
+	}
+	if model.fmtCursor != model.hit.formats.start+3 {
+		t.Errorf("click landed on cursor %d, want %d", model.fmtCursor, model.hit.formats.start+3)
+	}
+}
+
+func TestMouseClickFocusesAQueueRow(t *testing.T) {
+	model := newModel(t, Options{})
+	analyzedRow(t, model, "https://example.test/a")
+	analyzedRow(t, model, "https://example.test/b")
+	model.focus = 0
+	model.refreshDerived()
+	model.View()
+	y := model.hit.queue.top + 1
+	model.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, Y: y})
+	if model.focus != 1 || model.area != areaQueue {
+		t.Errorf("click on row 2 left focus=%d area=%v", model.focus, model.area)
 	}
 }

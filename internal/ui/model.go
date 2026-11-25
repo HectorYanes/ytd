@@ -35,17 +35,17 @@ var (
 	kindOptions      = []string{"all", string(format.Muxed), string(format.Video), string(format.Audio), string(format.Image)}
 	containerOptions = []string{"all", "mp4", "webm", "m4a"}
 
-	titleStyle    = lipgloss.NewStyle().Bold(true)
-	dimStyle      = lipgloss.NewStyle().Faint(true)
-	cursorStyle   = lipgloss.NewStyle().Reverse(true)
+	titleStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("4"))
+	dimStyle      = lipgloss.NewStyle().Faint(true).Foreground(lipgloss.Color("8"))
 	errorStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
 	warnStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
 	okStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
 	accentStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
 	audioStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
 	hdrStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("5"))
-	slotStyle     = lipgloss.NewStyle().Background(lipgloss.Color("237")).Padding(0, 1)
-	selectedStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("3"))
+	slotStyle     = lipgloss.NewStyle().Background(lipgloss.Color("234")).Padding(0, 1)
+	selectedStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("4"))
+	progressStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("4"))
 )
 
 // area is which widget owns printable keys.
@@ -54,12 +54,45 @@ type area int
 const (
 	areaURL area = iota
 	areaQueue
+	areaFormats
 	areaFilter
 )
 
 type logEntry struct {
 	text  string
 	level string
+}
+
+// panelHit is one scrollable table's on-screen window: the first terminal line
+// that draws data, how many lines it draws, and which logical row sits on top.
+type panelHit struct {
+	top   int
+	rows  int
+	start int
+}
+
+func (p panelHit) rowAt(y int) (int, bool) {
+	if !p.inside(y) {
+		return 0, false
+	}
+	return p.start + (y - p.top), true
+}
+
+func (p panelHit) inside(y int) bool {
+	return p.rows > 0 && y >= p.top && y < p.top+p.rows
+}
+
+// insideLoose also accepts the panel header line, so a wheel over it scrolls.
+func (p panelHit) insideLoose(y int) bool {
+	return p.rows > 0 && y >= p.top-1 && y < p.top+p.rows
+}
+
+// hitRegions is where the widgets ended up on the last render.
+type hitRegions struct {
+	queue   panelHit
+	formats panelHit
+	url     int
+	filter  int
 }
 
 // Model is the whole application state.
@@ -90,7 +123,12 @@ type Model struct {
 	visible   []format.Fmt
 	fmtCursor int
 
-	editor   *editor
+	editor *editor
+
+	// hit remembers the on-screen regions of the queue and format tables so mouse
+	// events land on the right row. It is recomputed on every render.
+	hit hitRegions
+
 	logLines []logEntry
 	notice   string
 	noticeAt time.Time
@@ -278,6 +316,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 		return m, m.handleKey(typed)
+	case tea.MouseMsg:
+		return m, m.handleMouse(typed)
 	}
 	return m, nil
 }
@@ -449,10 +489,12 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 			for _, url := range strings.Fields(raw) {
 				cmds = append(cmds, m.addURL(url)...)
 			}
+			if len(cmds) > 0 {
+				m.setArea(areaFormats)
+			}
 			return tea.Batch(cmds...)
 		case "down", "tab":
-			m.area = areaQueue
-			m.urlInput.Blur()
+			m.setArea(areaQueue)
 			return nil
 		case "esc":
 			m.urlInput.Blur()
@@ -463,36 +505,173 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		return cmd
 	case areaFilter:
 		switch msg.String() {
-		case "esc", "enter", "tab":
-			m.area = areaQueue
-			m.filterInput.Blur()
+		case "esc", "enter":
+			m.setArea(areaQueue)
 			return nil
+		case "tab":
+			return m.cycleArea(true)
+		case "shift+tab":
+			return m.cycleArea(false)
 		}
 		var cmd tea.Cmd
 		m.filterInput, cmd = m.filterInput.Update(msg)
 		m.refreshVisible()
 		return cmd
 	}
-	return m.handleQueueKey(msg)
+	return m.handleBodyKey(msg)
 }
 
-func (m *Model) handleQueueKey(msg tea.KeyMsg) tea.Cmd {
-	switch msg.String() {
+func (m *Model) handleMouse(msg tea.MouseMsg) tea.Cmd {
+	switch msg.Button {
+	case tea.MouseButtonWheelUp:
+		if msg.Action == tea.MouseActionPress {
+			return m.scrollMouse(msg.Y, -3)
+		}
+	case tea.MouseButtonWheelDown:
+		if msg.Action == tea.MouseActionPress {
+			return m.scrollMouse(msg.Y, 3)
+		}
+	}
+	if msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft {
+		return nil
+	}
+	switch {
+	case m.hit.url > 0 && msg.Y == m.hit.url:
+		m.setArea(areaURL)
+	case m.hit.filter >= 0 && msg.Y == m.hit.filter:
+		m.setArea(areaFilter)
+	case m.hit.queue.inside(msg.Y):
+		if index, ok := m.hit.queue.rowAt(msg.Y); ok && index >= 0 && index < len(m.jobs) {
+			if m.focus != index {
+				m.focus = index
+				m.fmtCursor = 0
+				m.refreshDerived()
+			}
+			m.setArea(areaQueue)
+		}
+	case m.hit.formats.inside(msg.Y):
+		if index, ok := m.hit.formats.rowAt(msg.Y); ok && index >= 0 && index < len(m.visible) {
+			m.fmtCursor = index
+			m.setArea(areaFormats)
+		}
+	}
+	return nil
+}
+
+// scrollMouse routes a wheel event to the panel under the pointer.
+func (m *Model) scrollMouse(y, delta int) tea.Cmd {
+	switch {
+	case m.hit.formats.insideLoose(y):
+		m.setArea(areaFormats)
+		m.moveFormatCursor(delta)
+	case m.hit.queue.insideLoose(y):
+		m.setArea(areaQueue)
+		if delta > 0 {
+			m.moveFocus(1)
+		} else {
+			m.moveFocus(-1)
+		}
+	}
+	return nil
+}
+
+// setArea moves keyboard focus to one pane and manages text input focus.
+func (m *Model) setArea(target area) {
+	m.area = target
+	switch target {
+	case areaURL:
+		m.filterInput.Blur()
+		m.urlInput.Focus()
+	case areaFilter:
+		m.urlInput.Blur()
+		m.filterInput.Focus()
+	default:
+		m.urlInput.Blur()
+		m.filterInput.Blur()
+	}
+}
+
+// cycleArea moves focus through URL → queue → formats → filter and back.
+func (m *Model) cycleArea(forward bool) tea.Cmd {
+	order := []area{areaURL, areaQueue, areaFormats, areaFilter}
+	index := 0
+	for i, candidate := range order {
+		if candidate == m.area {
+			index = i
+			break
+		}
+	}
+	if forward {
+		index = (index + 1) % len(order)
+	} else {
+		index = (index - 1 + len(order)) % len(order)
+	}
+	target := order[index]
+	m.setArea(target)
+	if target == areaFilter {
+		return m.filterInput.Focus()
+	}
+	return nil
+}
+
+func (m *Model) handleBodyKey(msg tea.KeyMsg) tea.Cmd {
+	key := msg.String()
+	switch key {
 	case "q":
 		m.quitting = true
 		return tea.Quit
-	case "up", "k":
-		m.moveFocus(-1)
-	case "down", "j":
-		m.moveFocus(1)
-	case "home", "g":
-		m.focus = 0
-		m.refreshDerived()
-	case "end", "G":
-		if len(m.jobs) > 0 {
-			m.focus = len(m.jobs) - 1
+	case "tab":
+		return m.cycleArea(true)
+	case "shift+tab":
+		return m.cycleArea(false)
+	case "f", "/":
+		m.setArea(areaFilter)
+		return m.filterInput.Focus()
+	}
+
+	if m.area == areaFormats {
+		switch key {
+		case "up", "k":
+			m.moveFormatCursor(-1)
+		case "down", "j":
+			m.moveFormatCursor(1)
+		case "pgup":
+			m.moveFormatCursor(-8)
+		case "pgdown":
+			m.moveFormatCursor(8)
+		case "home", "g":
+			m.fmtCursor = 0
+		case "end", "G":
+			if len(m.visible) > 0 {
+				m.fmtCursor = len(m.visible) - 1
+			}
+		case "left", "esc":
+			m.setArea(areaQueue)
 		}
-		m.refreshDerived()
+	} else {
+		switch key {
+		case "up", "k":
+			m.moveFocus(-1)
+		case "down", "j":
+			m.moveFocus(1)
+		case "pgup":
+			m.moveFocus(-6)
+		case "pgdown":
+			m.moveFocus(6)
+		case "home", "g":
+			m.focus = 0
+			m.refreshDerived()
+		case "end", "G":
+			if len(m.jobs) > 0 {
+				m.focus = len(m.jobs) - 1
+			}
+			m.refreshDerived()
+		case "right", "enter":
+			m.setArea(areaFormats)
+		}
+	}
+
+	switch key {
 	case "v":
 		if !m.pickVideo(m.currentFormatID()) {
 			m.notify("That row is not a video format.")
@@ -524,9 +703,6 @@ func (m *Model) handleQueueKey(msg tea.KeyMsg) tea.Cmd {
 			job.VideoID, job.AudioID = format.DefaultSelection(job.Formats, "")
 			m.refreshDerived()
 		}
-	case "f", "/":
-		m.area = areaFilter
-		return m.filterInput.Focus()
 	case "l":
 		m.showLog = !m.showLog
 	case "i":
@@ -539,14 +715,16 @@ func (m *Model) handleQueueKey(msg tea.KeyMsg) tea.Cmd {
 	case "p":
 		m.onlySize = !m.onlySize
 		m.refreshVisible()
-	case "pgup":
-		m.fmtCursor = max(0, m.fmtCursor-8)
-	case "pgdown":
-		if len(m.visible) > 0 {
-			m.fmtCursor = min(len(m.visible)-1, m.fmtCursor+8)
-		}
 	}
 	return nil
+}
+
+func (m *Model) moveFormatCursor(delta int) {
+	if len(m.visible) == 0 {
+		m.fmtCursor = 0
+		return
+	}
+	m.fmtCursor = clamp(m.fmtCursor+delta, 0, len(m.visible)-1)
 }
 
 func (m *Model) moveFocus(delta int) {
