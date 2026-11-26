@@ -72,8 +72,12 @@ type Manager struct {
 	OutDir        string
 	MaxConcurrent int
 	OnUpdate      func(format.Job)
-	Spawn         SpawnFunc
-	Prefix        []string
+	// OnLine receives the yt-dlp output that is not a progress line, so the UI
+	// can show why a download is idle (extracting cookies, retrying a dead
+	// connection, merging). It is optional.
+	OnLine func(uid int, line string)
+	Spawn  SpawnFunc
+	Prefix []string
 
 	mu          sync.Mutex
 	jobs        map[int]*format.Job
@@ -209,6 +213,8 @@ func (m *Manager) download(ctx context.Context, uid int, job *format.Job, prefix
 
 	reader := bufio.NewReaderSize(process, 64*1024)
 	lastError := ""
+	forwarded := 0
+	lastLine := ""
 	for {
 		line, readErr := reader.ReadString('\n')
 		if line != "" {
@@ -225,6 +231,8 @@ func (m *Manager) download(ctx context.Context, uid int, job *format.Job, prefix
 				job.ETA = progress.ETA
 				job.Size = progress.Size
 				m.emit(uid)
+			} else {
+				forwarded, lastLine = m.forwardLine(uid, trimmed, forwarded, lastLine)
 			}
 		}
 		if readErr != nil {
@@ -239,6 +247,21 @@ func (m *Manager) download(ctx context.Context, uid int, job *format.Job, prefix
 		return waitErr
 	}
 	return nil
+}
+
+// maxForwardedLines bounds the yt-dlp chatter that reaches the UI log for one
+// download. The first lines are the ones that explain an idle transfer, and a
+// chatty one must not evict the rest of the log.
+const maxForwardedLines = 40
+
+// forwardLine hands one non-progress line to OnLine, skipping blanks, repeats
+// and anything past the cap. It returns the updated counters.
+func (m *Manager) forwardLine(uid int, line string, forwarded int, last string) (int, string) {
+	if m.OnLine == nil || line == "" || line == last || forwarded >= maxForwardedLines {
+		return forwarded, last
+	}
+	m.OnLine(uid, line)
+	return forwarded + 1, line
 }
 
 type exitFailure struct {

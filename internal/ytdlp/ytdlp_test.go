@@ -412,8 +412,7 @@ func TestManagerReportsProgressThenDone(t *testing.T) {
 	}
 }
 
-func TestManagerMarksErrors(t *testing.T) {
-	manager := NewManager(t.TempDir(), 1, nil)
+func TestManagerMarksErrors(t *testing.T) {	manager := NewManager(t.TempDir(), 1, nil)
 	manager.Prefix = []string{"yt-dlp"}
 	manager.Spawn = staticSpawn([]string{"ERROR: [youtube] x: Video unavailable"}, fmt.Errorf("exit status 1"))
 

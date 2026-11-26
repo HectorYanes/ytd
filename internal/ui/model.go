@@ -159,6 +159,7 @@ type Model struct {
 	store     *store.Store
 	dirty     bool
 	updates   chan format.Job
+	logs      chan managerLog
 	pending   map[int]bool
 	analyzeFn AnalyzeFunc
 	initCmds  []tea.Cmd
@@ -210,6 +211,7 @@ func New(options Options) *Model {
 		showLog:       true,
 		hideHLS:       false,
 		updates:       make(chan format.Job, 256),
+		logs:          make(chan managerLog, 256),
 		pending:       map[int]bool{},
 		analyzeFn:     analyze,
 	}
@@ -243,6 +245,12 @@ func New(options Options) *Model {
 		default:
 		}
 	})
+	m.manager.OnLine = func(uid int, line string) {
+		select {
+		case m.logs <- managerLog{uid: uid, line: line}:
+		default:
+		}
+	}
 	if resolution, err := ytdlp.Resolve(); err == nil {
 		m.manager.Prefix = resolution.Prefix
 	}
@@ -303,7 +311,7 @@ func (m *Model) nextUID() int {
 
 // Init focuses the URL bar and starts the manager pump.
 func (m *Model) Init() tea.Cmd {
-	cmds := []tea.Cmd{m.urlInput.Focus(), m.waitUpdate()}
+	cmds := []tea.Cmd{m.urlInput.Focus(), m.waitUpdate(), m.waitLog()}
 	if m.store != nil {
 		cmds = append(cmds, m.flushCmd())
 	}
@@ -316,6 +324,13 @@ func (m *Model) Init() tea.Cmd {
 // ---------------------------------------------------------------------------
 
 type managerMsg struct{ job format.Job }
+
+// managerLog is one yt-dlp output line that is not progress, forwarded so the
+// log can explain why a download has not started moving yet.
+type managerLog struct {
+	uid  int
+	line string
+}
 
 type analyzeMsg struct {
 	uid    int
@@ -370,6 +385,18 @@ func (m *Model) waitUpdate() tea.Cmd {
 	}
 }
 
+// waitLog is the second pump: yt-dlp's own lines arrive on their own channel so
+// a burst of them can never delay a progress update.
+func (m *Model) waitLog() tea.Cmd {
+	return func() tea.Msg {
+		entry, ok := <-m.logs
+		if !ok {
+			return nil
+		}
+		return entry
+	}
+}
+
 func (m *Model) analyzeCmd(uid int, url string) tea.Cmd {
 	analyze := m.analyzeFn
 	return func() tea.Msg {
@@ -396,6 +423,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case managerMsg:
 		m.applySnapshot(typed.job)
 		return m, m.waitUpdate()
+
+	case managerLog:
+		m.writeLog("dim", fmt.Sprintf("#%d %s", typed.uid, typed.line))
+		return m, m.waitLog()
 
 	case analyzeMsg:
 		delete(m.pending, typed.uid)
