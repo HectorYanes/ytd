@@ -94,7 +94,7 @@ empaqueta: se detecta, se reporta en `--check` y la UI avisa al arrancar.
 | T8 | S6.3 | inline | done — `internal/store` (state dir por OS, JSON atómico, dedupe/UIDs, resume de descargas interrumpidas) + cableado en `ui.New`/`Init` con flush cada 2 s + 8 tests | este slice |
 | T9 | S6.1, S6.2, S6.4 | inline | done — caja con borde y título para URL/cola/formatos/log, log vertical de ancho completo del cuerpo, progreso en la celda `estado` y %/velocidad/ETA en la meta + 4 tests | este slice |
 | T10 | S7.1–S7.5 | inline | done — explorador partido en videos/muxed, selección Enter-only con `stage`/`stageUID`, audios filtrados por compatibilidad, `format.BestAudio`, columnas por tabla y log abierto con auto-hide + 11 tests nuevos | este slice |
-| T11 | S8.1–S8.3 | inline | done — `Manager.OnLine` reenvía el chatter de yt-dlp al log (tope 40, sin repetidas), décimas por debajo de 10% y `Path` del archivo mergeado + 6 tests nuevos | este slice |
+| T11 | S8.1–S8.3 | inline | done — `Manager.OnLine` reenvía el chatter de yt-dlp al log (tope 40, sin repetidas), décimas por debajo de 10% y `Path` del archivo mergeado; 7 tests nuevos, test de pantalla sin carrera tras `8ede055` | `8af0413` + `8ede055` |
 
 ## Log
 
@@ -207,3 +207,18 @@ empaqueta: se detecta, se reporta en `--check` y la UI avisa al arrancar.
   `go vet`/`gofmt` limpios; render real a 120x40 con `ytd -o … BBB` mostrando
   `0.1% → 0.6%` en la fila y las líneas `#1 [youtube] …`/`#1 [download]
   Destination: …` en el panel.
+- **L25** (review finding, accepted): el test de pantalla nuevo leía
+  `model.logLines` desde la goroutine del test mientras `program.Run()`
+  escribía en ese slice; `go test -race` lo confirmó
+  (`writeLog`/`startAll` vs. `logHas`). Corregido en `8ede055`: el test ahora
+  alimenta el modelo directo por `waitLog` en la goroutine del test, sin
+  `tea.Program`, sin sleeps y sin estado compartido, y además fija el prefijo
+  `#<fila>` y el borde 9.94→9.95→10 con ancho de celda constante.
+  `go test -race -count=1 ./...` verde, `go vet`/`gofmt` limpios.
+- **L26** (decision): la revisión nativa no pudo correr porque los agentes
+  `review-*`, `jd-*` y el verificador apuntan a `opencode/glm-5.3-flash-free`,
+  modelo que no existe en este OpenCode (el catálogo ofrece
+  `opencode/glm-5.3-flash`). El usuario eligió saltear la revisión: se ejecutó
+  `gentle-ai review mode disable --scope clone`, que deja RDD apagado solo en
+  este clon (global sigue en `on`). Reencenderlo: `gentle-ai review mode
+  enable --scope clone`, después de arreglar el nombre del modelo.
