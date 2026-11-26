@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
@@ -873,6 +874,36 @@ func TestEarlyProgressShowsTenthsSoItNeverLooksStuck(t *testing.T) {
 	row = lineContaining(model.View(), "A video")
 	if !strings.Contains(row, "12%") || strings.Contains(row, "12.4%") {
 		t.Errorf("past ten percent the cell is whole again: %q", row)
+	}
+}
+
+// The cell must not change width when it switches from tenths to whole
+// numbers, or every row under it would shift at the ten percent mark.
+func TestStatusCellKeepsItsWidthAcrossTheTenthsBoundary(t *testing.T) {
+	job := *format.NewJob(1, "https://example.test/a")
+	job.Status = format.Downloading
+	labels := map[float64]string{
+		0:    "0.0%",
+		9.94: "9.9%",
+		9.95: "10%",
+		10:   "10%",
+		42:   "42%",
+		100:  "100%",
+	}
+	width := 0
+	for percent, want := range labels {
+		job.Percent = percent
+		cell := statusCell(job, 20)
+		if !strings.Contains(cell, want) {
+			t.Errorf("at %v%% the cell reads %q, want %q in it", percent, cell, want)
+		}
+		if width == 0 {
+			width = utf8.RuneCountInString(cell)
+			continue
+		}
+		if got := utf8.RuneCountInString(cell); got != width {
+			t.Errorf("at %v%% the cell is %d wide, want %d: %q", percent, got, width, cell)
+		}
 	}
 }
 
