@@ -855,6 +855,27 @@ func TestQueueRowCarriesItsOwnProgressBar(t *testing.T) {
 	}
 }
 
+func TestEarlyProgressShowsTenthsSoItNeverLooksStuck(t *testing.T) {
+	model := newModel(t, Options{})
+	analyzedRow(t, model, "https://example.test/a")
+	snapshot := model.jobs[0]
+	snapshot.Status = format.Downloading
+	snapshot.Percent = 0.4
+	model.Update(managerMsg{job: snapshot})
+
+	row := lineContaining(model.View(), "A video")
+	if !strings.Contains(row, "0.4%") {
+		t.Errorf("a fourth of a percent should be visible: %q", row)
+	}
+
+	snapshot.Percent = 12.4
+	model.Update(managerMsg{job: snapshot})
+	row = lineContaining(model.View(), "A video")
+	if !strings.Contains(row, "12%") || strings.Contains(row, "12.4%") {
+		t.Errorf("past ten percent the cell is whole again: %q", row)
+	}
+}
+
 func TestPanelsAreBorderedAndTheLogIsVertical(t *testing.T) {
 	model := newModel(t, Options{})
 	analyzedRow(t, model, "https://example.test/a")

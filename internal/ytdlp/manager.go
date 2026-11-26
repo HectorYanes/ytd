@@ -222,6 +222,9 @@ func (m *Manager) download(ctx context.Context, uid int, job *format.Job, prefix
 			if marker := strings.Index(trimmed, "Destination:"); marker >= 0 {
 				job.Path = strings.TrimSpace(trimmed[marker+len("Destination:"):])
 			}
+			if merged := mergedPath(trimmed); merged != "" {
+				job.Path = merged
+			}
 			if strings.HasPrefix(trimmed, "ERROR:") {
 				lastError = strings.TrimSpace(trimmed[len("ERROR:"):])
 			}
@@ -247,6 +250,17 @@ func (m *Manager) download(ctx context.Context, uid int, job *format.Job, prefix
 		return waitErr
 	}
 	return nil
+}
+
+// mergedPath is the file yt-dlp reports when it joins a video and an audio
+// stream. The per-stream Destination lines point at files it deletes, so the
+// merged name is the only one worth showing.
+func mergedPath(line string) string {
+	const marker = "[Merger] Merging formats into "
+	if !strings.HasPrefix(line, marker) {
+		return ""
+	}
+	return strings.Trim(strings.TrimSpace(line[len(marker):]), `"`)
 }
 
 // maxForwardedLines bounds the yt-dlp chatter that reaches the UI log for one

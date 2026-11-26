@@ -412,7 +412,109 @@ func TestManagerReportsProgressThenDone(t *testing.T) {
 	}
 }
 
-func TestManagerMarksErrors(t *testing.T) {	manager := NewManager(t.TempDir(), 1, nil)
+func TestManagerForwardsYtDlpChatterToTheLog(t *testing.T) {
+	manager := NewManager(t.TempDir(), 1, nil)
+	manager.Prefix = []string{"yt-dlp"}
+	manager.Spawn = staticSpawn([]string{
+		"[youtube] Extracting URL: https://example.test/a",
+		"[download]   0.0% of    2.07MiB at   13.90KiB/s ETA 02:32",
+		"[download] Got error: Network is unreachable. Retrying (1/10)...",
+		"[Merger] Merging formats into \"/out/a.mp4\"",
+		"ERROR: boom",
+	}, fmt.Errorf("exit status 1"))
+	var mu sync.Mutex
+	var lines []string
+	manager.OnLine = func(uid int, line string) {
+		mu.Lock()
+		defer mu.Unlock()
+		lines = append(lines, line)
+	}
+
+	manager.Submit(*format.NewJob(3, "URL"))
+	manager.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	for _, want := range []string{
+		"Extracting URL",
+		"Network is unreachable",
+		"Merging formats",
+		"ERROR: boom",
+	} {
+		found := false
+		for _, line := range lines {
+			if strings.Contains(line, want) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("the log never saw %q: %v", want, lines)
+		}
+	}
+	for _, line := range lines {
+		if strings.Contains(line, "% of") {
+			t.Errorf("a progress line leaked into the log: %q", line)
+		}
+	}
+}
+
+func TestManagerCapsForwardedLines(t *testing.T) {
+	manager := NewManager(t.TempDir(), 1, nil)
+	manager.Prefix = []string{"yt-dlp"}
+	chatter := make([]string, 0, 200)
+	for index := 0; index < 200; index++ {
+		chatter = append(chatter, fmt.Sprintf("[youtube] line %d", index))
+	}
+	manager.Spawn = staticSpawn(chatter, nil)
+	counted := 0
+	manager.OnLine = func(uid int, line string) { counted++ }
+
+	manager.Submit(*format.NewJob(4, "URL"))
+	manager.Wait()
+
+	if counted != maxForwardedLines {
+		t.Errorf("forwarded %d lines, want %d", counted, maxForwardedLines)
+	}
+}
+
+func TestManagerSkipsRepeatedChatter(t *testing.T) {
+	manager := NewManager(t.TempDir(), 1, nil)
+	manager.Prefix = []string{"yt-dlp"}
+	manager.Spawn = staticSpawn([]string{
+		"[download] Got error: timeout. Retrying (1/10)...",
+		"[download] Got error: timeout. Retrying (1/10)...",
+	}, nil)
+	var lines []string
+	manager.OnLine = func(uid int, line string) { lines = append(lines, line) }
+
+	manager.Submit(*format.NewJob(5, "URL"))
+	manager.Wait()
+
+	if len(lines) != 1 {
+		t.Errorf("lines = %v", lines)
+	}
+}
+
+func TestManagerReportsTheMergedFile(t *testing.T) {
+	manager := NewManager(t.TempDir(), 1, nil)
+	manager.Prefix = []string{"yt-dlp"}
+	manager.Spawn = staticSpawn([]string{
+		`[download] Destination: /out/a.f398.mp4`,
+		`[download] Destination: /out/a.f140.m4a`,
+		`[Merger] Merging formats into "/out/a.mp4"`,
+	}, nil)
+
+	manager.Submit(*format.NewJob(9, "URL"))
+	manager.Wait()
+
+	final, _ := manager.Snapshot(9)
+	if final.Path != "/out/a.mp4" {
+		t.Errorf("path = %q, want the merged file", final.Path)
+	}
+}
+
+func TestManagerMarksErrors(t *testing.T) {
+	manager := NewManager(t.TempDir(), 1, nil)
 	manager.Prefix = []string{"yt-dlp"}
 	manager.Spawn = staticSpawn([]string{"ERROR: [youtube] x: Video unavailable"}, fmt.Errorf("exit status 1"))
 

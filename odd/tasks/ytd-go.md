@@ -68,6 +68,17 @@ empaqueta: se detecta, se reporta en `--check` y la UI avisa al arrancar.
     lista se muestran todos). La tabla muxed no muestra `id` ni `ext`.
   - **S7.5**. La tabla muxed es navegable y focuseable (Tab, flechas, clic,
     Enter): Enter sobre un muxed fija `VideoID` y limpia `AudioID`.
+- **S8**. El pedido del usuario, literal: "La descarga se mantiene todo el
+  tiempo en 0%". La descarga tiene que poder explicarse sola y mostrar
+  movimiento desde el arranque.
+  - **S8.1**. El log muestra las líneas de yt-dlp que no son progreso (cookies,
+    extracción, reintentos, miniatura, merge, `ERROR:`) con el número de fila
+    delante (`#1 …`), como máximo 40 por descarga, sin repetir seguidas. Una
+    transferencia detenida deja de ser un 0% mudo.
+  - **S8.2**. Por debajo de 10% la celda `estado` muestra un decimal (`0.4%`);
+    de 10% en adelante, entero (`42%`). El ancho de la celda no cambia.
+  - **S8.3**. Cuando hay merge, la ruta de la fila es el archivo final, no el
+    `.fNNN` intermedio que yt-dlp borra.
 
 ## Tasks
 
@@ -83,6 +94,7 @@ empaqueta: se detecta, se reporta en `--check` y la UI avisa al arrancar.
 | T8 | S6.3 | inline | done — `internal/store` (state dir por OS, JSON atómico, dedupe/UIDs, resume de descargas interrumpidas) + cableado en `ui.New`/`Init` con flush cada 2 s + 8 tests | este slice |
 | T9 | S6.1, S6.2, S6.4 | inline | done — caja con borde y título para URL/cola/formatos/log, log vertical de ancho completo del cuerpo, progreso en la celda `estado` y %/velocidad/ETA en la meta + 4 tests | este slice |
 | T10 | S7.1–S7.5 | inline | done — explorador partido en videos/muxed, selección Enter-only con `stage`/`stageUID`, audios filtrados por compatibilidad, `format.BestAudio`, columnas por tabla y log abierto con auto-hide + 11 tests nuevos | este slice |
+| T11 | S8.1–S8.3 | inline | done — `Manager.OnLine` reenvía el chatter de yt-dlp al log (tope 40, sin repetidas), décimas por debajo de 10% y `Path` del archivo mergeado + 6 tests nuevos | este slice |
 
 ## Log
 
@@ -171,3 +183,27 @@ empaqueta: se detecta, se reporta en `--check` y la UI avisa al arrancar.
   --committed-only` sobre este slice devuelve `risk: medium`,
   `review_due: false` (`under_budget`); RDD sigue activo y el boundary queda en
   este commit.
+- **L21** (user request, verbatim): "La descarga se mantiene todo el tiempo en
+  0%"
+- **L22** (diagnosis): no se pudo reproducir un porcentaje congelado. Con el
+  binario real en un pty, contra el `queue.json` real del usuario (restaurado,
+  con las cookies de brave y el mismo video), la descarga completó al 100% y el
+  manager emitió snapshots 0.1→100; un probe headless con la ruta completa de
+  bubbletea (`Init`→`waitUpdate`→`applySnapshot`→`View`) mostró la barra
+  subiendo 0→100 en pantalla. El archivo de cola del usuario (02:33) tenía
+  `percent 0`, `speed ""`, `size ""` y `path ""`: yt-dlp no había emitido ni
+  `Destination:` antes de que la sesión terminara. Un probe propio reprodujo
+  `[download] Got error: … Network is unreachable. Retrying (1/10)`, con 20–30 s
+  de silencio. Defecto real: `Manager.download` descartaba toda línea que no
+  fuera progreso, así que una descarga detenida no dejaba rastro visible; y el
+  entero de la celda se queda en `0%` durante más de un minuto en una
+  transferencia grande (el default de BBB son 1.27 GiB a ~500 KiB/s).
+- **L23** (decision): `Manager.OnLine` manda el chatter al log por un canal
+  propio (nunca demora un progreso), con tope de 40 líneas y sin repetidas
+  consecutivas; por debajo de 10% la celda muestra décimas para que el
+  movimiento se vea; y el `[Merger] Merging formats into` fija la ruta final en
+  vez del `.fNNN` que yt-dlp borra.
+- **L24** (evidence): `go test -count=1 ./...` verde (6 tests nuevos),
+  `go vet`/`gofmt` limpios; render real a 120x40 con `ytd -o … BBB` mostrando
+  `0.1% → 0.6%` en la fila y las líneas `#1 [youtube] …`/`#1 [download]
+  Destination: …` en el panel.

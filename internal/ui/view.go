@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -418,12 +419,18 @@ func statusCell(job format.Job, width int) string {
 	if job.Status != format.Downloading {
 		return format.StatusLabel(job.Status, job.Percent, job.Error)
 	}
-	percent := clamp(int(job.Percent+0.5), 0, 100)
+	whole := clamp(int(job.Percent+0.5), 0, 100)
 	barWidth := max(4, width-6)
-	filled := barWidth * percent / 100
+	filled := barWidth * whole / 100
+	// Below ten percent a whole number would sit on "0%" for a long while on a
+	// big or slow transfer, which reads as a stuck download; the tenth shows the
+	// movement without widening the cell.
+	label := fmt.Sprintf("%4.0f%%", float64(whole))
+	if job.Percent < 9.95 {
+		label = fmt.Sprintf("%4.1f%%", math.Max(0, job.Percent))
+	}
 	return strings.Repeat("█", filled) +
-		strings.Repeat("░", barWidth-filled) +
-		fmt.Sprintf(" %3d%%", percent)
+		strings.Repeat("░", barWidth-filled) + label
 }
 
 // ---------------------------------------------------------------------------
