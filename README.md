@@ -1,86 +1,127 @@
-# ytd — a format explorer TUI for yt-dlp
+# ytd
 
-`yt-dlp -F` prints an unreadable wall of 47 rows. You cannot search it, you
-cannot see which qualities need a separate audio stream, and you cannot tell a
-progressive MP4 from an HLS variant without squinting. `ytd` turns that output
-into a filterable table and downloads exactly what you pick.
+A queue TUI for [yt-dlp](https://github.com/yt-dlp/yt-dlp): paste URLs, pick the
+exact video and audio streams, and watch several downloads at once.
+
+It is a single Go binary. On first use it downloads its own `yt-dlp` and `deno`
+into a cache directory, so a fresh machine needs nothing but `ffmpeg`.
+
+```
+┌ ytd — yt-dlp queue                                    out ~/Downloads
+│ › paste a URL (or several, space separated) and press Enter
+│ #  título                  calidad       audio        estado        tamaño
+│ 1  Big Buck Bunny 60fps    1080p60 · av1 opus 160k    descargando (42%)  4.1M
+│
+│ 2160p60 · av1 · video-only
+│ 1080p60 · av1 · video-only
+│ 1080p   · h264 · video-only
+│ audio   · opus · audio-only
+│
+│ / filter…                              kind:all ext:mp4 sized:false hls:true
+│ sel id    kind   res      vcodec acodec hdr fps br     size    ext  src note
+│ V   399   video  1080p60  av1    —      —   60  3.0M   —       mp4  —   —
+│ A   251   audio  audio    —      opus   —   —   160k   —       webm —   —
+│
+│ Big Buck Bunny · calidad: 1080p60 · av1 · audio: opus 160k · -f 399+251
+```
 
 ## Install
 
-```bash
-# already installed at ~/.local/bin/ytd (symlink into ~/.local/bin)
-ln -sf ~/tools/ytd/ytd.py ~/.local/bin/ytd
+Requirements: `ffmpeg` on `PATH`. Everything else is handled by the binary.
 
-ytd                      # empty, paste a URL
-ytd 'https://youtu.be/…' # analyze on start
-ytd -o ~/Videos 'URL'    # custom output directory
+- **Prebuilt binary** — grab the archive for your OS/arch from the releases page,
+  unpack it, and put `ytd` somewhere on `PATH`.
+- **From source** — needs Go 1.26+:
+
+  ```sh
+  git clone <repo> ~/tools/ytd && cd ~/tools/ytd
+  ./install.sh              # Linux/macOS → ~/.local/bin
+  .\install.ps1             # Windows → %LOCALAPPDATA%\ytd\bin
+  ```
+
+  Both scripts build with `-trimpath -ldflags "-s -w"`, run `ytd --update` and
+  then `ytd --check`.
+
+## First run
+
+```sh
+ytd                          # empty queue
+ytd URL [URL ...]            # queue these on start
+ytd -o ~/Videos -j 2 URL     # other output dir, two parallel downloads
+ytd --check                  # environment report, no TUI
+ytd --update                 # refresh the managed yt-dlp and deno
 ```
 
-Requires `yt-dlp` and `ffmpeg` in `PATH`. The script itself is a PEP 723 uv
-script: `uv run` provisions Textual on first launch, nothing global.
+`--check` prints the version, the resolved yt-dlp (with its version), ffmpeg,
+the JavaScript runtime, the yt-dlp config it found, the merge container and the
+output directory. It exits non-zero when yt-dlp or ffmpeg is missing.
 
 ## Keys
 
 | key | action |
 | --- | --- |
-| `Enter` in the URL field | analyze the URL |
-| `v` | set the highlighted row as the **video** part |
-| `a` | set the highlighted row as the **audio** part |
-| `d` | download the current selection |
-| `y` | copy the equivalent `yt-dlp -f …` command |
-| `f` | jump to the filter box |
-| `l` | toggle the log pane |
-| `r` | clear the selection |
-| `q` | quit |
+| `Enter` (URL bar) | queue every URL in the bar |
+| `↓` / `Tab` | leave the URL bar, enter the queue |
+| `↑` `↓` `k` `j` | move through the queue |
+| `e` | analyze the row; on an analyzed row, edit its streams |
+| `v` / `a` | take the explorer's current row as video / audio-only |
+| `d` | download the focused row |
+| `s` | download every loaded, failed or cancelled row |
+| `x` | cancel the focused download |
+| `delete` | remove the row (cancelling it if needed) |
+| `c` | show only streams compatible with the merge container |
+| `r` | reset the choice to the recommended streams |
+| `f` | filter the explorer (`1080`, `av1`, `opus`, `muxed`…) |
+| `i` / `o` / `h` / `p` | cycle kind, cycle ext, toggle HLS, only sized |
+| `l` | show or hide the log |
+| `q` | quit (`Ctrl+C` works everywhere) |
 
-Filtering is live: the free-text box matches id, extension, kind, resolution,
-both codecs, HDR, notes and language. The dropdowns narrow by kind and
-container; the checkboxes hide formats with no known size and hide HLS
-variants. Storyboards are hidden unless you select "images".
+In the editor: `Tab` switches video/audio, `↑↓` move, `i` reveals incompatible
+streams, `Enter` applies, `Esc` cancels.
 
-## Why select two rows
+## How it works
 
-Above 720p YouTube serves video and audio as separate streams — a "1080p MP4"
-does not exist as a single file. `ytd` makes that explicit: `v` + `a` builds
-`-f 137+140`, and the availability panel tells you which heights are muxed,
-which are HLS-only, and which are video-only.
+- **Analysis is lazy and flat.** A URL is analyzed with `yt-dlp -J
+  --flat-playlist`; a playlist becomes one row per entry and each row is
+  analyzed only when you ask for it.
+- **Your yt-dlp config wins.** `ytd` passes no `-f` unless you chose streams, so
+  `~/.config/yt-dlp/config` decides; `-P home:<outdir>` still overrides
+  `--paths`. The merge container (`--merge-output-format`) is read from that
+  config and drives the compatibility matrix: `mp4` accepts h264/h265/av1 with
+  aac/mp3/ac3/eac3/alac, `webm` takes vp8/vp9/av1 with opus/vorbis, and `mkv`
+  takes anything.
+- **Streams are fetched separately.** The first run downloads yt-dlp and deno
+  into `<cache>/ytd/bin` (`~/.cache/ytd/bin` on Linux, `~/Library/Caches/...`
+  on macOS, `%LOCALAPPDATA%` on Windows) and verifies the published checksums.
+  `YTD_YTDLP=/path/to/yt-dlp` and a `yt-dlp` already on `PATH` take precedence.
 
-## Interaction with your yt-dlp config
+## Troubleshooting
 
-`~/.config/yt-dlp/config` is still loaded (cookies, output template, merge
-container, embedding). `ytd` only overrides two things:
+- **No formats listed for a YouTube URL** — YouTube needs a JavaScript runtime
+  to expose formats at all. The app warns at startup; `ytd --update` installs
+  `deno`. Without it, even `-f 18` fails with `Requested format is not available`.
+- **`ERROR: failed to read from keyring`** — yt-dlp's cookie backend could not
+  reach the secret store. Downloads usually still work; unlock the keyring or
+  drop `--cookies-from-browser` from the config if it keeps failing.
+- **A merge falls back to re-encoding** — one of the two streams is not
+  compatible with `--merge-output-format`. The explorer marks those rows and the
+  editor flags them; `c` shows only compatible ones.
+- **`--check` says yt-dlp is missing** — run `ytd --update`, or install yt-dlp
+  yourself and set `YTD_YTDLP`.
 
-- `-f` — your selection wins over `--format` in the config.
-- `-P home:<dir>` — the output directory, verified to override a `--paths`
-  entry from the config.
+## Development
 
-## Implementation notes
-
-- **Textual `App.log` collision.** `App` already owns `.log` (a `Logger`);
-  defining `def log(self, …)` silently breaks `self.call_from_thread`. The
-  helper here is `write_log`.
-- **uv shadows the system interpreter.** `yt-dlp`'s launcher resolves its
-  interpreter via `/usr/bin/env python3`. Inside a `uv run` script, PATH points
-  at uv's managed CPython, which has no `secretstorage`, so
-  `--cookies-from-browser …+gnomekeyring` dies with "cannot decrypt v11
-  cookies". `child_env()` prunes the uv entries from the child PATH.
-- **A non-zero exit can still carry usable JSON.** yt-dlp exits 1 when a cookie
-  backend warns while still emitting complete metadata, so the JSON payload is
-  preferred over the exit code.
-
-## Tests
-
-```bash
-uv run --with textual python test_ytd.py     # 23 tests, no pytest needed
+```sh
+go test ./...            # unit and program tests, no network
+YTD_E2E=1 go test ./...  # adds the real YouTube probes
+go vet ./... && gofmt -l .
 ```
 
-Covers codec mapping, format classification, size fallbacks, every filter,
-the availability report, progress parsing, the child environment, and the
-TUI itself (row rendering, filtering, selection, command building, and a
-small-terminal layout regression at 80x24).
+Layout: `internal/format` (the domain model: formats, filters, compatibility,
+selection, job), `internal/ytdlp` (the yt-dlp boundary: resolution, config,
+progress, verified downloads, analysis, download pool), `internal/ui`
+(bubbletea model, view and editor), `cmd/ytd` (flags).
 
-## Not implemented yet
+## License
 
-- Playlists (the app says so instead of guessing which entry you meant).
-- Live manifests beyond what the `formats` array exposes.
-- Per-format subtitle and chapter pickers — the config's defaults apply.
+MIT — see `LICENSE`.
