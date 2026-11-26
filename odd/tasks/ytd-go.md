@@ -37,8 +37,8 @@ empaqueta: se detecta, se reporta en `--check` y la UI avisa al arrancar.
   hay nada, otra cosa, ponle bordes a los containers para ver bien las
   divisiones".
   - **S6.1**. El log es un panel vertical a la derecha del cuerpo (borde
-    propio), no una tira al pie. En terminales de menos de 76 columnas cae al
-    bloque inferior como fallback.
+    propio), no una tira al pie. El fallback a bloque inferior que tenía esta
+    spec queda derogado por S7.3: en terminales chicas el log se esconde.
   - **S6.2**. La fila de la cola muestra su propia barra de progreso en la
     columna `estado` mientras descarga (`███░░ 42%`), y la línea meta del video
     enfocado suma `%`, velocidad y ETA. No hay línea de progreso separada.
@@ -49,6 +49,25 @@ empaqueta: se detecta, se reporta en `--check` y la UI avisa al arrancar.
   - **S6.4**. Todos los paneles (URL, cola, formatos, log) llevan borde redondeado
     con el título en el borde superior; el borde se resalta cuando el panel tiene
     el foco.
+- **S7**. Tercera ronda de UI, pedido del usuario (resumen del mensaje, el texto
+  original no se conservó verbatim en esta sesión): partir el panel de formatos
+  en dos, elegir solo con Enter, log abierto por defecto y tablas más angostas.
+  - **S7.1**. El explorador son dos cajas apiladas. Arriba, la tabla de videos;
+    abajo, la de formatos progresivos (muxed), que ocupa la mitad del espacio
+    anterior y solo aparece cuando la fila tiene formatos muxed.
+  - **S7.2**. La selección es solo con Enter. Enter sobre un video pasa la tabla
+    de arriba a los audios que se pueden mergear con ese video; Enter sobre un
+    audio lo fija; Esc vuelve a la lista de videos y un segundo Esc sale a la
+    cola. Las teclas `v` y `a` ya no eligen nada.
+  - **S7.3**. El log arranca abierto; se esconde solo cuando la terminal no
+    alcanza (menos de 76 columnas o menos de 24 filas) y `l` avisa en vez de
+    abrirlo en un espacio que no entra. No hay fallback de log inferior.
+  - **S7.4**. La tabla de videos no muestra `id`, `ext`, `acodec` ni `hdr`, y
+    ofrece únicamente los videos con la extensión del contenedor de merge
+    (`mp4`→mp4, `webm`→webm, `mkv`/desconocido sin filtro; si el filtro vacía la
+    lista se muestran todos). La tabla muxed no muestra `id` ni `ext`.
+  - **S7.5**. La tabla muxed es navegable y focuseable (Tab, flechas, clic,
+    Enter): Enter sobre un muxed fija `VideoID` y limpia `AudioID`.
 
 ## Tasks
 
@@ -63,6 +82,7 @@ empaqueta: se detecta, se reporta en `--check` y la UI avisa al arrancar.
 | T7 | S5 | inline | done — `internal/ui/view.go` rediseñado (barra tipo Textual, explorador de formatos dominante, colores por kind, slots y progreso) + navegación URL→cola→formatos→filtro, rueda/clic de mouse, 7 tests nuevos | 454d74c |
 | T8 | S6.3 | inline | done — `internal/store` (state dir por OS, JSON atómico, dedupe/UIDs, resume de descargas interrumpidas) + cableado en `ui.New`/`Init` con flush cada 2 s + 8 tests | este slice |
 | T9 | S6.1, S6.2, S6.4 | inline | done — caja con borde y título para URL/cola/formatos/log, log vertical de ancho completo del cuerpo, progreso en la celda `estado` y %/velocidad/ETA en la meta + 4 tests | este slice |
+| T10 | S7.1–S7.5 | inline | done — explorador partido en videos/muxed, selección Enter-only con `stage`/`stageUID`, audios filtrados por compatibilidad, `format.BestAudio`, columnas por tabla y log abierto con auto-hide + 11 tests nuevos | este slice |
 
 ## Log
 
@@ -132,3 +152,22 @@ empaqueta: se detecta, se reporta en `--check` y la UI avisa al arrancar.
   resume, archivo corrupto y flush al salir), `go vet` limpio, `gofmt` limpio y
   `YTD_E2E=1 TestProgramRunsAgainstYouTube` pasa en 7.2 s con el layout de
   bordes y el log vertical.
+- **L17** (user request, resumen): partir el panel de formatos en dos (videos
+  arriba, muxed abajo solo si existen), selección solo con Enter (sin `v`/`a`),
+  log abierto por defecto con auto-hide en terminales chicas y tablas con menos
+  columnas. El texto original no se conservó verbatim en esta sesión.
+- **L18** (decision): el split se modela con `stage` (`stageVideo`/`stageAudio`)
+  y `stageUID`, así cambiar de fila vuelve solo a la lista de videos. Elegir un
+  video conserva el audio si sigue siendo compatible y si no toma el mejor con
+  `format.BestAudio`. Los audios se filtran por `format.IsCompatible` y los
+  videos por la familia del contenedor de merge; los dos filtros tienen fallback
+  a la lista completa para no dejar un callejón sin salida. Se eliminaron el
+  filtro `kind` (`i`) y su columna porque el split ya separa por tipo.
+- **L19** (evidence): `go test -count=1 ./...` verde, `go vet` y `gofmt` limpios;
+  `YTD_E2E=1 TestProgramRunsAgainstYouTube` pasa en 11.2 s. Se revisó el render
+  real a 120x40, 96x30 y 70x22 en las dos etapas: a 70x22 el log se esconde solo
+  y quedan las dos cajas apiladas.
+- **L20** (evidence): `gentle-ai review assess --base-ref 0afa695
+  --committed-only` sobre este slice devuelve `risk: medium`,
+  `review_due: false` (`under_budget`); RDD sigue activo y el boundary queda en
+  este commit.

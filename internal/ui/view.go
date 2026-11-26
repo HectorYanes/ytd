@@ -29,26 +29,12 @@ var (
 )
 
 const (
-	logLinesShown = 6
-	queueMaxRows  = 8
-	// minLogWidth is the narrowest terminal that still fits a vertical log.
-	minLogWidth = 76
+	queueMaxRows = 8
+	// minLogWidth and minLogHeight are the smallest terminal that still fits
+	// the vertical log panel; below either one it hides itself.
+	minLogWidth  = 76
+	minLogHeight = 24
 )
-
-// kindStyle colours a stream by its kind, mirroring the Textual palette.
-func kindStyle(kind format.Kind) lipgloss.Style {
-	switch kind {
-	case format.Muxed:
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("3")) // yellow
-	case format.Video:
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("6")) // cyan
-	case format.Audio:
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("2")) // green
-	case format.Image:
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("8")) // bright black
-	}
-	return lipgloss.NewStyle()
-}
 
 // contentWidth is the main column's width, excluding the vertical log panel.
 func (m *Model) contentWidth() int {
@@ -73,7 +59,7 @@ func (m *Model) View() string {
 	H, W := m.height, m.width
 
 	job := m.focusedJob()
-	sideLog := m.showLog && W >= minLogWidth
+	sideLog := m.showLog && m.logFits()
 	logWidth := 0
 	if sideLog {
 		logWidth = clamp(W/3, 30, 46)
@@ -82,31 +68,29 @@ func (m *Model) View() string {
 
 	// Header (1) + URL box (3) + footer (1) are fixed chrome.
 	bodyH := max(4, H-5)
-	bottomLog := 0
-	if m.showLog && !sideLog {
-		bottomLog = min(len(m.logLines), logLinesShown) + 1
-	}
-	if H < 22 {
-		bottomLog = 0
-	}
 
 	reportLines := m.reportLineBudget(job)
 	slots := true
 
+	// The progressive table stacks under the video table only when both have
+	// rows; the extra borders and header come out of the formats area so the
+	// body height does not move when a row has muxed streams.
+	stacked := len(m.muxed) > 0 && len(m.visible) > 0
+	extraBox := 0
+	if stacked {
+		extraBox = 3
+	}
+
 	// Rows spent on chrome inside the main column: meta, filter, both boxes'
 	// borders and column headers, plus the optional slots line.
 	chrome := func() int {
-		count := 8 // meta + filter + queue box (3) + formats box (3)
+		count := 8 + extraBox // meta + filter + queue box (3) + formats box (3)
 		if slots {
 			count++
 		}
-		return count + reportLines + bottomLog
+		return count + reportLines
 	}
 	dataRows := bodyH - chrome()
-	if dataRows < 2 && !sideLog && bottomLog > 0 {
-		bottomLog = 0
-		dataRows = bodyH - chrome()
-	}
 	if dataRows < 2 && reportLines > 0 {
 		reportLines = 0
 		dataRows = bodyH - chrome()
@@ -126,6 +110,14 @@ func (m *Model) View() string {
 	formatRows := max(1, dataRows-queueRows)
 	if leftover := bodyH - chrome() - queueRows - formatRows; leftover > 0 {
 		formatRows += leftover
+	}
+	muxedRows := 0
+	if len(m.muxed) > 0 {
+		muxedRows = formatRows
+		if stacked {
+			muxedRows = max(1, (formatRows-3)/2)
+			formatRows = max(1, formatRows-3-muxedRows)
+		}
 	}
 
 	lines := make([]string, 0, H)
@@ -147,16 +139,25 @@ func (m *Model) View() string {
 	m.hit.filter = bodyTop + len(main)
 	main = append(main, m.filterView())
 
-	formatBody, formatWindow := m.formatsPanel(formatRows)
-	formatTop := len(main)
-	main = append(main, boxLines(m.panelTitle("formats", len(m.visible)), formatBody, m.contentWidth(), m.area == areaFormats)...)
-	m.hit.formats = panelHit{top: bodyTop + formatTop + 2, rows: formatWindow.rows, start: formatWindow.start}
+	if m.showsTop() {
+		formatBody, formatWindow := m.formatsPanel(formatRows)
+		formatTop := len(main)
+		main = append(main, boxLines(m.videoPanelTitle(), formatBody, m.contentWidth(), m.area == areaFormats)...)
+		m.hit.formats = panelHit{top: bodyTop + formatTop + 2, rows: formatWindow.rows, start: formatWindow.start}
+	} else {
+		m.hit.formats = panelHit{}
+	}
+	if muxedRows > 0 {
+		muxedBody, muxedWindow := m.muxedPanel(muxedRows)
+		muxedTop := len(main)
+		main = append(main, boxLines(m.panelTitle("muxed", len(m.muxed)), muxedBody, m.contentWidth(), m.area == areaMuxed)...)
+		m.hit.muxed = panelHit{top: bodyTop + muxedTop + 2, rows: muxedWindow.rows, start: muxedWindow.start}
+	} else {
+		m.hit.muxed = panelHit{}
+	}
 
 	if slots {
 		main = append(main, m.slotsView())
-	}
-	if bottomLog > 0 {
-		main = append(main, m.logBlock(bottomLog)...)
 	}
 	for len(main) < bodyH {
 		main = append(main, "")
@@ -495,8 +496,8 @@ func (m *Model) filterView() string {
 	} else {
 		left = dimStyle.Render("/ filter: 1080, av1, opus…")
 	}
-	tags := fmt.Sprintf("kind:%s  ext:%s  sized:%s  hls:%s  compat:%s",
-		kindOptions[m.kindIdx], containerOptions[m.contIdx],
+	tags := fmt.Sprintf("ext:%s  sized:%s  hls:%s  compat:%s",
+		containerOptions[m.contIdx],
 		onOff(m.onlySize), onOff(!m.hideHLS), onOff(m.compatOnly))
 	return truncateANSI(" "+left+"    "+dimStyle.Render(tags), m.contentWidth())
 }
@@ -512,12 +513,15 @@ func onOff(on bool) string {
 // format explorer
 // ---------------------------------------------------------------------------
 
-// colSpec is one column of the format explorer.
+// colSpec is one column of a formats table.
 type colSpec struct {
 	key   string
 	title string
 	width int
 }
+
+// columnBuilder lays out a table's columns for a given inner width.
+type columnBuilder func(width int) []colSpec
 
 func colsWidth(cols []colSpec) int {
 	total := 0
@@ -527,44 +531,99 @@ func colsWidth(cols []colSpec) int {
 	return total + max(0, len(cols)-1)
 }
 
-// formatColumns picks the widest column set that fits, dropping optional
-// columns on narrow terminals and giving the rest to the free-form note.
-func formatColumns(width int) []colSpec {
-	sel := colSpec{"sel", "sel", 3}
-	id := colSpec{"id", "id", 6}
-	kind := colSpec{"kind", "kind", 6}
-	res := colSpec{"res", "res", 8}
-	vcodec := colSpec{"vcodec", "vcodec", 9}
-	acodec := colSpec{"acodec", "acodec", 9}
-	hdr := colSpec{"hdr", "hdr", 6}
-	fps := colSpec{"fps", "fps", 4}
-	br := colSpec{"br", "br", 7}
-	size := colSpec{"size", "size", 8}
-	ext := colSpec{"ext", "ext", 5}
-	src := colSpec{"src", "src", 5}
-	note := colSpec{"note", "note", 0}
-
-	if width >= 88 {
-		cols := []colSpec{sel, id, kind, res, vcodec, acodec, hdr, fps, br, size, ext, src}
-		if leftover := width - colsWidth(cols) - 1; leftover >= 10 {
-			note.width = leftover
-			cols = append(cols, note)
+// fitColumns keeps the columns that fit, dropping the least important ones from
+// the end (the note goes first) and handing any leftover room to the note.
+func fitColumns(width int, cols []colSpec) []colSpec {
+	out := append([]colSpec(nil), cols...)
+	for len(out) > 3 && colsWidth(out) > width {
+		// Drop the last fixed column, keeping the note at the tail.
+		out = append(out[:len(out)-2], out[len(out)-1])
+	}
+	if last := len(out) - 1; out[last].key == "note" {
+		fixed := colsWidth(out) - out[last].width
+		if leftover := width - fixed - 1; leftover >= 10 {
+			out[last].width = leftover
+		} else {
+			out = out[:last]
 		}
-		return cols
 	}
-	if width >= 78 {
-		return []colSpec{sel, id, kind, res, vcodec, acodec, hdr, fps, br, size, ext}
-	}
-	if width >= 64 {
-		return []colSpec{sel, id, kind, res, vcodec, acodec, br, size, ext}
-	}
-	return []colSpec{sel, id, kind, res, vcodec, acodec, size}
+	return out
 }
 
-// formatsPanel renders the column header plus up to rows rows, scrolled so the
-// cursor stays visible.
+// videoColumns is the video stream table: no id, ext, acodec or hdr.
+func videoColumns(width int) []colSpec {
+	return fitColumns(width, []colSpec{
+		{"sel", "sel", 3},
+		{"res", "res", 8},
+		{"vcodec", "vcodec", 9},
+		{"fps", "fps", 4},
+		{"br", "br", 7},
+		{"size", "size", 8},
+		{"note", "note", 0},
+	})
+}
+
+// audioColumns is the audio stream table shown after a video is picked.
+func audioColumns(width int) []colSpec {
+	return fitColumns(width, []colSpec{
+		{"sel", "sel", 3},
+		{"acodec", "acodec", 9},
+		{"br", "br", 7},
+		{"size", "size", 8},
+		{"note", "note", 0},
+	})
+}
+
+// muxedColumns is the progressive table: both codecs, still no id or ext.
+func muxedColumns(width int) []colSpec {
+	return fitColumns(width, []colSpec{
+		{"sel", "sel", 3},
+		{"res", "res", 8},
+		{"vcodec", "vcodec", 9},
+		{"acodec", "acodec", 9},
+		{"fps", "fps", 4},
+		{"br", "br", 7},
+		{"size", "size", 8},
+		{"note", "note", 0},
+	})
+}
+
+// videoPanelTitle labels the top table with what it currently lists.
+func (m *Model) videoPanelTitle() string {
+	name := "videos"
+	if m.stage == stageAudio {
+		name = "audio"
+		if job := m.focusedJob(); job != nil && job.VideoID != "" {
+			name += " for " + job.VideoID
+		}
+	}
+	if len(m.visible) == 0 {
+		return name
+	}
+	return fmt.Sprintf("%s · %d", name, len(m.visible))
+}
+
+// formatsPanel renders the top table: the video streams, or the audio streams of
+// the video already chosen.
 func (m *Model) formatsPanel(rows int) ([]string, panelHit) {
-	cols := formatColumns(m.panelInner())
+	builder := columnBuilder(videoColumns)
+	if m.stage == stageAudio {
+		builder = audioColumns
+	}
+	return m.formatTable(builder, m.visible, m.fmtCursor, rows, m.area == areaFormats,
+		"(no formats match — adjust the filter)")
+}
+
+// muxedPanel renders the progressive (video+audio) formats table.
+func (m *Model) muxedPanel(rows int) ([]string, panelHit) {
+	return m.formatTable(muxedColumns, m.muxed, m.muxedCursor, rows, m.area == areaMuxed,
+		"(no muxed formats)")
+}
+
+// formatTable renders a column header plus up to rows rows, scrolled so the
+// cursor stays visible.
+func (m *Model) formatTable(builder columnBuilder, entries []format.Fmt, cursor, rows int, active bool, empty string) ([]string, panelHit) {
+	cols := builder(m.panelInner())
 	body := []string{dimStyle.Render(formatHeader(cols))}
 	window := panelHit{}
 	if rows <= 0 {
@@ -572,21 +631,21 @@ func (m *Model) formatsPanel(rows int) ([]string, panelHit) {
 	}
 	window.rows = rows
 	start := 0
-	if m.fmtCursor >= rows {
-		start = m.fmtCursor - rows + 1
+	if cursor >= rows {
+		start = cursor - rows + 1
 	}
 	window.start = start
 	for offset := 0; offset < rows; offset++ {
 		index := start + offset
-		if index >= len(m.visible) {
-			if offset == 0 && len(m.visible) == 0 {
-				body = append(body, dimStyle.Render("  (no formats match — adjust the filter)"))
+		if index >= len(entries) {
+			if offset == 0 && len(entries) == 0 {
+				body = append(body, dimStyle.Render("  "+empty))
 			} else {
 				body = append(body, "")
 			}
 			continue
 		}
-		body = append(body, m.formatRow(cols, m.visible[index], index == m.fmtCursor))
+		body = append(body, m.formatRow(cols, entries[index], index == cursor, active))
 	}
 	return body, window
 }
@@ -601,7 +660,7 @@ func formatHeader(cols []colSpec) string {
 	return joinCells(widths, cells)
 }
 
-func (m *Model) formatRow(cols []colSpec, candidate format.Fmt, cursor bool) string {
+func (m *Model) formatRow(cols []colSpec, candidate format.Fmt, cursor, active bool) string {
 	values := m.formatValues(candidate)
 	raw := make([]string, len(cols))
 	for i, c := range cols {
@@ -610,7 +669,7 @@ func (m *Model) formatRow(cols []colSpec, candidate format.Fmt, cursor bool) str
 	plain := strings.Join(raw, " ")
 	if cursor {
 		style := cursorOffStyle
-		if m.area == areaFormats {
+		if active {
 			style = cursorOnStyle
 		}
 		return style.Render(padRight(plain, m.panelInner()))
@@ -648,23 +707,14 @@ func (m *Model) formatValues(candidate format.Fmt) map[string]string {
 	if problem := format.CompatibilityNote(candidate, m.mergeFormat); problem != "" {
 		note = strings.TrimSpace(note + " ⚠ " + problem)
 	}
-	source := candidate.Protocol
-	if candidate.IsHLS() {
-		source = "hls"
-	}
 	return map[string]string{
 		"sel":    mark,
-		"id":     candidate.ID,
-		"kind":   string(candidate.Kind),
 		"res":    candidate.Resolution(),
 		"vcodec": firstNonEmpty(candidate.VCodecName(), "—"),
 		"acodec": firstNonEmpty(candidate.ACodecName(), "—"),
-		"hdr":    firstNonEmpty(candidate.HDRLabel(), "—"),
 		"fps":    fpsLabel(candidate),
 		"br":     format.HumanBitrate(candidate.TBR),
 		"size":   format.HumanSize(candidate.Size),
-		"ext":    candidate.Ext,
-		"src":    firstNonEmpty(source, "—"),
 		"note":   note,
 	}
 }
@@ -673,14 +723,6 @@ func (m *Model) formatCellStyle(key string, candidate format.Fmt) (lipgloss.Styl
 	switch key {
 	case "sel":
 		return selectionMark, true
-	case "id":
-		return kindStyle(candidate.Kind).Bold(true), true
-	case "kind":
-		return kindStyle(candidate.Kind), true
-	case "hdr":
-		if candidate.HDRLabel() != "" {
-			return hdrStyle, true
-		}
 	case "note":
 		if problem := format.CompatibilityNote(candidate, m.mergeFormat); problem != "" {
 			return warnStyle, true
@@ -752,19 +794,6 @@ func (m *Model) logEntries(limit, width int) []string {
 	return out
 }
 
-// logBlock is the fallback for terminals too narrow for a vertical log.
-func (m *Model) logBlock(limit int) []string {
-	lines := []string{dimStyle.Render(" log")}
-	entries := min(limit-1, logLinesShown)
-	if entries <= 0 {
-		return lines
-	}
-	for _, entry := range m.logEntries(entries, m.panelInner()-2) {
-		lines = append(lines, "  "+entry)
-	}
-	return lines
-}
-
 func (m *Model) footerView() string {
 	tail := "q quit"
 	if m.notice != "" {
@@ -773,7 +802,7 @@ func (m *Model) footerView() string {
 		return truncateANSI(notice+"  "+footerStyle.Render(tail), m.width)
 	}
 	segments := []string{
-		"tab pane", "↑↓ move", "v video", "a audio", "d download", "e edit",
+		"tab pane", "↑↓ move", "enter pick", "← back", "d download", "e edit",
 		"s start", "x cancel", "f filter", "l log",
 	}
 	room := m.width - lipgloss.Width(tail) - 3

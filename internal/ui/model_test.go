@@ -102,9 +102,15 @@ func focusQueue(model *Model) {
 // analyzedRow adds one URL and delivers its analysis synchronously.
 func analyzedRow(t *testing.T, model *Model, url string) {
 	t.Helper()
+	analyzedRowWith(t, model, url, fixtureResult("A video"))
+}
+
+// analyzedRowWith is analyzedRow with a custom analysis result.
+func analyzedRowWith(t *testing.T, model *Model, url string, result ytdlp.AnalyzeResult) {
+	t.Helper()
 	model.addURL(url)
 	uid := model.jobs[len(model.jobs)-1].UID
-	model.Update(analyzeMsg{uid: uid, result: fixtureResult("A video")})
+	model.Update(analyzeMsg{uid: uid, result: result})
 	focusQueue(model)
 }
 
@@ -162,7 +168,8 @@ func TestAnalysisErrorMarksTheRow(t *testing.T) {
 }
 
 func TestFilterNarrowsTheExplorer(t *testing.T) {
-	model := newModel(t, Options{})
+	// mkv merges anything, so every stream reaches the filter.
+	model := newModel(t, Options{MergeFormat: "mkv"})
 	analyzedRow(t, model, "https://example.test/a")
 	all := len(model.visible)
 	model.filterInput.SetValue("1080")
@@ -183,23 +190,26 @@ func TestFilterNarrowsTheExplorer(t *testing.T) {
 }
 
 func TestCompatToggleHidesIncompatibleStreams(t *testing.T) {
+	// The container filter normally drops these rows already; the fallback path
+	// (nothing matches the container) is where the toggle still has work to do.
+	webmOnly := []format.Fmt{
+		{ID: "247", Ext: "webm", Kind: format.Video, VCodec: "vp9", Height: 720, Available: true},
+	}
 	model := newModel(t, Options{MergeFormat: "mp4"})
-	analyzedRow(t, model, "https://example.test/a")
-
-	before := ids(model.visible)
-	press(model, "c")
-	after := ids(model.visible)
-	if len(after) >= len(before) {
-		t.Fatalf("compat mode kept %d of %d rows", len(after), len(before))
-	}
-	for _, id := range after {
-		if id == "247" || id == "251" {
-			t.Errorf("incompatible format %s survived the filter", id)
-		}
+	analyzedRowWith(t, model, "https://example.test/a", ytdlp.AnalyzeResult{
+		Info:    format.Info{Type: "video", ID: "abc", Title: "A video"},
+		Formats: webmOnly,
+	})
+	if len(model.visible) != 1 {
+		t.Fatalf("the fallback should still offer the webm stream, got %v", ids(model.visible))
 	}
 	press(model, "c")
-	if len(model.visible) != len(before) {
-		t.Error("toggling compat back should restore every row")
+	if len(model.visible) != 0 {
+		t.Errorf("compat mode kept an unmergeable stream: %v", ids(model.visible))
+	}
+	press(model, "c")
+	if len(model.visible) != 1 {
+		t.Error("toggling compat back should restore the row")
 	}
 }
 
@@ -211,58 +221,187 @@ func ids(formats []format.Fmt) []string {
 	return out
 }
 
-func TestPickVideoAndAudioFromTheExplorer(t *testing.T) {
+func sameIDs(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for index := range got {
+		if got[index] != want[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func TestExplorerShowsVideosAboveAndMuxedBelow(t *testing.T) {
 	model := newModel(t, Options{})
 	analyzedRow(t, model, "https://example.test/a")
+	press(model, "right")
 
-	model.fmtCursor = indexOfID(model.visible, "399")
-	press(model, "v")
-	if model.jobs[0].VideoID != "399" {
-		t.Errorf("video = %q", model.jobs[0].VideoID)
+	if got := ids(model.visible); !sameIDs(got, []string{"137", "399"}) {
+		t.Fatalf("top rows = %v, want the mp4 video streams", got)
 	}
-	if model.jobs[0].AudioID == "" {
-		t.Error("picking a video-only stream must keep the audio choice")
+	if got := ids(model.muxed); !sameIDs(got, []string{"18"}) {
+		t.Errorf("muxed rows = %v", got)
+	}
+	model.View()
+	if model.hit.formats.rows == 0 || model.hit.muxed.rows == 0 {
+		t.Fatalf("both tables must be laid out: videos=%d muxed=%d",
+			model.hit.formats.rows, model.hit.muxed.rows)
+	}
+	if model.hit.muxed.rows >= model.hit.formats.rows {
+		t.Errorf("the muxed table takes %d rows, the video table only %d",
+			model.hit.muxed.rows, model.hit.formats.rows)
 	}
 
-	model.fmtCursor = indexOfID(model.visible, "251")
-	press(model, "a")
-	if model.jobs[0].AudioID != "251" {
-		t.Errorf("audio = %q", model.jobs[0].AudioID)
+	view := model.View()
+	if lineContaining(view, "╭─ videos") == "" {
+		t.Errorf("no video table:\n%s", view)
+	}
+	if lineContaining(view, "╭─ muxed") == "" {
+		t.Errorf("no muxed table:\n%s", view)
 	}
 }
 
-func TestPickingAMuxedStreamClearsTheAudioChoice(t *testing.T) {
-	model := newModel(t, Options{})
+func TestEnterPicksAVideoThenShowsTheCompatibleAudio(t *testing.T) {
+	model := newModel(t, Options{MergeFormat: "mp4"})
 	analyzedRow(t, model, "https://example.test/a")
-	model.jobs[0].AudioID = "140"
-	model.fmtCursor = indexOfID(model.visible, "18")
-	press(model, "v")
-	if model.jobs[0].VideoID != "18" || model.jobs[0].AudioID != "" {
+	press(model, "right")
+
+	model.fmtCursor = indexOfFormat(model.visible, "137")
+	press(model, "enter")
+
+	job := model.jobs[0]
+	if job.VideoID != "137" {
+		t.Fatalf("video = %q, want 137", job.VideoID)
+	}
+	if model.stage != stageAudio {
+		t.Fatal("picking a video must move the explorer on to the audio streams")
+	}
+	// opus cannot be merged into mp4 without a re-encode, so only aac is offered.
+	if got := ids(model.visible); !sameIDs(got, []string{"140"}) {
+		t.Errorf("audio rows = %v, want the compatible aac stream", got)
+	}
+	if job.AudioID != "140" {
+		t.Errorf("audio = %q, want the compatible default 140", job.AudioID)
+	}
+	if lineContaining(model.View(), "╭─ audio") == "" {
+		t.Error("the top table is not titled audio")
+	}
+}
+
+func TestEnterOnAnAudioRowReplacesTheAudioStream(t *testing.T) {
+	model := newModel(t, Options{MergeFormat: "mkv"})
+	analyzedRow(t, model, "https://example.test/a")
+	press(model, "right")
+
+	model.fmtCursor = indexOfFormat(model.visible, "399")
+	press(model, "enter")
+	if got := ids(model.visible); !sameIDs(got, []string{"140", "251"}) {
+		t.Fatalf("audio rows = %v, want both streams for mkv", got)
+	}
+	model.fmtCursor = indexOfFormat(model.visible, "140")
+	press(model, "enter")
+
+	if model.jobs[0].AudioID != "140" || model.jobs[0].VideoID != "399" {
 		t.Errorf("choice = %q/%q", model.jobs[0].VideoID, model.jobs[0].AudioID)
 	}
 }
 
-func TestPickingTheWrongKindIsRejected(t *testing.T) {
+func TestEnterOnAMuxedRowClearsTheAudioChoice(t *testing.T) {
 	model := newModel(t, Options{})
 	analyzedRow(t, model, "https://example.test/a")
-	model.jobs[0].VideoID, model.jobs[0].AudioID = "", ""
-	model.fmtCursor = indexOfID(model.visible, "251")
-	press(model, "v")
-	if model.jobs[0].VideoID != "" {
-		t.Errorf("an audio row was accepted as video: %q", model.jobs[0].VideoID)
+	press(model, "right")
+	press(model, "tab")
+	if model.area != areaMuxed {
+		t.Fatalf("tab did not reach the muxed table, area = %v", model.area)
 	}
-	if !strings.Contains(model.notice, "not a video format") {
-		t.Errorf("notice = %q", model.notice)
+
+	model.muxedCursor = indexOfFormat(model.muxed, "18")
+	press(model, "enter")
+	if model.jobs[0].VideoID != "18" || model.jobs[0].AudioID != "" {
+		t.Errorf("choice = %q/%q, want the muxed stream alone",
+			model.jobs[0].VideoID, model.jobs[0].AudioID)
 	}
 }
 
-func indexOfID(formats []format.Fmt, id string) int {
-	for index, candidate := range formats {
-		if candidate.ID == id {
-			return index
-		}
+func TestEscapeFromAudioGoesBackToVideos(t *testing.T) {
+	model := newModel(t, Options{MergeFormat: "mkv"})
+	analyzedRow(t, model, "https://example.test/a")
+	press(model, "right")
+	model.fmtCursor = indexOfFormat(model.visible, "399")
+	press(model, "enter")
+
+	press(model, "esc")
+	if model.stage != stageVideo {
+		t.Fatal("esc should return to the video list")
 	}
-	return 0
+	if model.area != areaFormats {
+		t.Errorf("esc left the explorer, area = %v", model.area)
+	}
+	if model.visible[model.fmtCursor].ID != "399" {
+		t.Errorf("cursor = %q, want the chosen video", model.visible[model.fmtCursor].ID)
+	}
+	press(model, "esc")
+	if model.area != areaQueue {
+		t.Errorf("a second esc should return to the queue, area = %v", model.area)
+	}
+}
+
+func TestVAKeysNoLongerPickStreams(t *testing.T) {
+	model := newModel(t, Options{})
+	analyzedRow(t, model, "https://example.test/a")
+	press(model, "right")
+	video, audio := model.jobs[0].VideoID, model.jobs[0].AudioID
+
+	model.fmtCursor = indexOfFormat(model.visible, "399")
+	press(model, "v")
+	press(model, "a")
+	if model.jobs[0].VideoID != video || model.jobs[0].AudioID != audio {
+		t.Errorf("v/a changed the selection to %q/%q; picking is Enter-only",
+			model.jobs[0].VideoID, model.jobs[0].AudioID)
+	}
+}
+
+func TestMuxedTableDisappearsWithoutMuxedFormats(t *testing.T) {
+	progressive := fixtureFormats()[:5] // video + audio, no muxed row
+	model := newModel(t, Options{})
+	analyzedRowWith(t, model, "https://example.test/a", ytdlp.AnalyzeResult{
+		Info:    format.Info{Type: "video", ID: "abc", Title: "A video"},
+		Formats: progressive,
+	})
+	press(model, "right")
+
+	if len(model.muxed) != 0 {
+		t.Fatalf("muxed rows = %d, want none", len(model.muxed))
+	}
+	if lineContaining(model.View(), "╭─ muxed") != "" {
+		t.Error("the muxed table is rendered with nothing to show")
+	}
+	press(model, "tab")
+	if model.area != areaFilter {
+		t.Errorf("tab should skip the missing muxed table, area = %v", model.area)
+	}
+}
+
+func TestAudioTableFallsBackWhenNothingIsCompatible(t *testing.T) {
+	streams := []format.Fmt{
+		{ID: "137", Ext: "mp4", Kind: format.Video, VCodec: "avc1.640028", Height: 1080, Available: true},
+		{ID: "251", Ext: "webm", Kind: format.Audio, ACodec: "opus", ABR: 160, TBR: 160, Available: true},
+	}
+	model := newModel(t, Options{MergeFormat: "mp4"})
+	analyzedRowWith(t, model, "https://example.test/a", ytdlp.AnalyzeResult{
+		Info:    format.Info{Type: "video", ID: "abc", Title: "A video"},
+		Formats: streams,
+	})
+	press(model, "right")
+	press(model, "enter")
+
+	// Nothing merges into mp4 without a re-encode, but the table must not be a
+	// dead end: the stream is still offered, flagged with the compatibility note.
+	if got := ids(model.visible); !sameIDs(got, []string{"251"}) {
+		t.Errorf("audio rows = %v, want the opus stream offered anyway", got)
+	}
 }
 
 func TestResetRestoresTheDefaultSelection(t *testing.T) {
@@ -302,8 +441,8 @@ func TestEditorAppliesTheChosenStreams(t *testing.T) {
 		t.Fatal("editor did not open")
 	}
 	editor := model.editor
-	editor.videoSel = indexOfID(editor.video, "399")
-	editor.audioSel = indexOfID(editor.audio, "140")
+	editor.videoSel = indexOfFormat(editor.video, "399")
+	editor.audioSel = indexOfFormat(editor.audio, "140")
 	press(model, "enter")
 
 	if model.editor != nil {
@@ -319,7 +458,7 @@ func TestEditorEscLeavesTheChoiceAlone(t *testing.T) {
 	analyzedRow(t, model, "https://example.test/a")
 	before := model.jobs[0].VideoID + "/" + model.jobs[0].AudioID
 	press(model, "e")
-	model.editor.videoSel = indexOfID(model.editor.video, "137")
+	model.editor.videoSel = indexOfFormat(model.editor.video, "137")
 	press(model, "esc")
 	if model.editor != nil {
 		t.Error("Esc should close the editor")
@@ -488,15 +627,37 @@ func TestViewIsEmptyQueueSafe(t *testing.T) {
 func TestLogPaneToggles(t *testing.T) {
 	model := newModel(t, Options{})
 	focusQueue(model)
-	if model.showLog {
-		t.Error("the log should start hidden")
-	}
-	press(model, "l")
 	if !model.showLog {
-		t.Error("l did not show the log")
+		t.Error("the log should start open")
 	}
 	if !strings.Contains(model.View(), "yt-dlp:") {
 		t.Errorf("log content missing from the view:\n%s", model.View())
+	}
+	press(model, "l")
+	if model.showLog {
+		t.Error("l did not hide the log")
+	}
+	press(model, "l")
+	if !model.showLog {
+		t.Error("l did not show the log again")
+	}
+}
+
+func TestLogHidesItselfOnASmallTerminal(t *testing.T) {
+	model := newModel(t, Options{})
+	analyzedRow(t, model, "https://example.test/a")
+	if !strings.Contains(model.View(), "╭─ log") {
+		t.Fatalf("the log should be open at 120x40:\n%s", model.View())
+	}
+
+	model.Update(tea.WindowSizeMsg{Width: 70, Height: 22})
+	if strings.Contains(model.View(), "╭─ log") {
+		t.Error("the log should hide when the terminal has no room for it")
+	}
+	press(model, "l")
+	press(model, "l")
+	if strings.Contains(model.View(), "╭─ log") {
+		t.Error("toggling the log cannot force it into a terminal that is too small")
 	}
 }
 
@@ -569,7 +730,7 @@ func TestTabCyclesThroughEveryPane(t *testing.T) {
 }
 
 func TestFormatExplorerArrowNavigation(t *testing.T) {
-	model := newModel(t, Options{})
+	model := newModel(t, Options{MergeFormat: "mkv"})
 	analyzedRow(t, model, "https://example.test/a")
 	press(model, "right") // drill from the queue into the explorer
 	if model.area != areaFormats {
@@ -602,8 +763,8 @@ func TestMouseWheelScrollsTheFormatExplorer(t *testing.T) {
 	}
 	y := model.hit.formats.top
 	model.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonWheelDown, Y: y})
-	if model.fmtCursor != 3 {
-		t.Errorf("wheel down did not scroll the explorer: cursor = %d", model.fmtCursor)
+	if model.fmtCursor != len(model.visible)-1 {
+		t.Errorf("wheel down did not reach the last video: cursor = %d", model.fmtCursor)
 	}
 	model.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonWheelUp, Y: y})
 	if model.fmtCursor != 0 {
@@ -615,13 +776,27 @@ func TestMouseClickSelectsAFormatRow(t *testing.T) {
 	model := newModel(t, Options{})
 	analyzedRow(t, model, "https://example.test/a")
 	model.View()
-	y := model.hit.formats.top + 3
+	y := model.hit.formats.top + 1
 	model.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, Y: y})
 	if model.area != areaFormats {
 		t.Errorf("clicking a format row should focus the explorer, area = %v", model.area)
 	}
-	if model.fmtCursor != model.hit.formats.start+3 {
-		t.Errorf("click landed on cursor %d, want %d", model.fmtCursor, model.hit.formats.start+3)
+	if model.fmtCursor != model.hit.formats.start+1 {
+		t.Errorf("click landed on cursor %d, want %d", model.fmtCursor, model.hit.formats.start+1)
+	}
+}
+
+func TestMouseClickSelectsAMuxedRow(t *testing.T) {
+	model := newModel(t, Options{})
+	analyzedRow(t, model, "https://example.test/a")
+	model.View()
+	y := model.hit.muxed.top
+	model.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, Y: y})
+	if model.area != areaMuxed {
+		t.Errorf("clicking the muxed table should focus it, area = %v", model.area)
+	}
+	if model.muxedCursor != model.hit.muxed.start {
+		t.Errorf("cursor = %d, want %d", model.muxedCursor, model.hit.muxed.start)
 	}
 }
 
@@ -683,7 +858,6 @@ func TestQueueRowCarriesItsOwnProgressBar(t *testing.T) {
 func TestPanelsAreBorderedAndTheLogIsVertical(t *testing.T) {
 	model := newModel(t, Options{})
 	analyzedRow(t, model, "https://example.test/a")
-	press(model, "l")
 
 	view := model.View()
 	queueBox := lineContaining(view, "╭─ queue")
@@ -693,7 +867,7 @@ func TestPanelsAreBorderedAndTheLogIsVertical(t *testing.T) {
 	if !strings.Contains(queueBox, "╭─ log") {
 		t.Errorf("the log is not a vertical panel beside the queue: %q", queueBox)
 	}
-	for _, want := range []string{"╭─ formats", "╮", "╯", "│"} {
+	for _, want := range []string{"╭─ videos", "╭─ muxed", "╮", "╯", "│"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("view is missing %q", want)
 		}
@@ -787,5 +961,97 @@ func TestQuittingFlushesTheQueue(t *testing.T) {
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("the queue was not flushed on quit: %v", err)
+	}
+}
+
+func TestExplorerStillHandlesTheGlobalKeys(t *testing.T) {
+	model := newModel(t, Options{})
+	analyzedRow(t, model, "https://example.test/a")
+	press(model, "right") // the explorer owns the keys now
+	press(model, "c")
+	if !model.compatOnly {
+		t.Error("c no longer toggles compatibility while the explorer has focus")
+	}
+	wasLog := model.showLog
+	press(model, "l")
+	if model.showLog == wasLog {
+		t.Error("l no longer toggles the log while the explorer has focus")
+	}
+}
+
+func TestLayoutFitsEveryTerminalSize(t *testing.T) {
+	sizes := [][2]int{{70, 22}, {76, 24}, {84, 26}, {100, 30}, {120, 40}, {160, 46}}
+	for _, size := range sizes {
+		for _, log := range []bool{false, true} {
+			model := newModel(t, Options{MergeFormat: "mkv"})
+			model.Update(tea.WindowSizeMsg{Width: size[0], Height: size[1]})
+			analyzedRow(t, model, "https://example.test/a")
+			model.showLog = log
+			lines := strings.Split(model.View(), "\n")
+			if len(lines) != size[1] {
+				t.Errorf("%dx%d log=%v: %d lines", size[0], size[1], log, len(lines))
+			}
+			for _, line := range lines {
+				if width := ansi.StringWidth(line); width > size[0] {
+					t.Errorf("%dx%d log=%v: line is %d wide: %q", size[0], size[1], log, width, line)
+				}
+			}
+		}
+	}
+}
+
+// linesContaining returns every rendered line that mentions needle.
+func linesContaining(view, needle string) []string {
+	var out []string
+	for _, line := range strings.Split(view, "\n") {
+		if strings.Contains(line, needle) {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+func TestVideoAndMuxedTablesDropTheConstantColumns(t *testing.T) {
+	model := newModel(t, Options{MergeFormat: "mp4"})
+	analyzedRow(t, model, "https://example.test/a")
+	model.View()
+
+	headers := linesContaining(model.View(), "sel ")
+	if len(headers) < 2 {
+		t.Fatalf("expected two table headers, got %d:\n%s", len(headers), model.View())
+	}
+	video, muxed := headers[0], headers[1]
+	for _, unwanted := range []string{"id", "ext", "acodec", "hdr"} {
+		if strings.Contains(video, unwanted) {
+			t.Errorf("the video table still shows %q: %q", unwanted, video)
+		}
+	}
+	for _, want := range []string{"res", "vcodec", "fps", "size"} {
+		if !strings.Contains(video, want) {
+			t.Errorf("the video table lost %q: %q", want, video)
+		}
+	}
+	for _, unwanted := range []string{"id", "ext"} {
+		if strings.Contains(muxed, unwanted) {
+			t.Errorf("the muxed table still shows %q: %q", unwanted, muxed)
+		}
+	}
+	if !strings.Contains(muxed, "acodec") || !strings.Contains(muxed, "vcodec") {
+		t.Errorf("the muxed table should keep both codecs: %q", muxed)
+	}
+}
+
+func TestVideoTableKeepsOnlyTheContainerExtension(t *testing.T) {
+	model := newModel(t, Options{MergeFormat: "mp4"})
+	analyzedRow(t, model, "https://example.test/a")
+	if got := ids(model.visible); !sameIDs(got, []string{"137", "399"}) {
+		t.Errorf("mp4 container rows = %v, want only the mp4 videos", got)
+	}
+
+	// A container that takes anything keeps every stream.
+	webm := newModel(t, Options{MergeFormat: "mkv"})
+	analyzedRow(t, webm, "https://example.test/a")
+	if got := ids(webm.visible); !sameIDs(got, []string{"137", "399", "247"}) {
+		t.Errorf("mkv container rows = %v, want every video", got)
 	}
 }

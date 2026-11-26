@@ -704,6 +704,29 @@ func audioQuality(f Fmt) [2]float64 {
 	return [2]float64{rate, size}
 }
 
+// BestAudio returns the id of the highest-quality audio-only stream that can be
+// merged into mergeFormat, or "" when the row has no usable audio. It lets the
+// explorer fill in a sensible audio track the moment a video is picked.
+func BestAudio(fmts []Fmt, mergeFormat string) string {
+	var chosen *Fmt
+	for index := range fmts {
+		candidate := &fmts[index]
+		if !candidate.Available || candidate.Kind != Audio {
+			continue
+		}
+		if !IsCompatible(*candidate, mergeFormat) {
+			continue
+		}
+		if chosen == nil || betterAudio(*candidate, *chosen) {
+			chosen = candidate
+		}
+	}
+	if chosen == nil {
+		return ""
+	}
+	return chosen.ID
+}
+
 func betterAudio(left, right Fmt) bool {
 	a, b := audioQuality(left), audioQuality(right)
 	if a[0] != b[0] {

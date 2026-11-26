@@ -329,6 +329,27 @@ func TestDefaultSelectionMuxedOnly(t *testing.T) {
 	}
 }
 
+func TestBestAudio(t *testing.T) {
+	audio := func(id, codec string, abr float64) Fmt {
+		return Fmt{ID: id, Ext: "webm", ACodec: codec, ABR: abr, TBR: abr, Kind: Audio, Available: true}
+	}
+	streams := []Fmt{
+		{ID: "137", Ext: "mp4", VCodec: "avc1.640028", Kind: Video, Available: true},
+		audio("251", "opus", 160),
+		audio("140", "mp4a.40.2", 128),
+	}
+	if got := BestAudio(streams, "mkv"); got != "251" {
+		t.Errorf("best audio = %q, want the highest bitrate 251", got)
+	}
+	// mp4 cannot carry opus, so the aac stream wins even though it is smaller.
+	if got := BestAudio(streams, "mp4"); got != "140" {
+		t.Errorf("best mp4 audio = %q, want 140", got)
+	}
+	if got := BestAudio([]Fmt{streams[0]}, "mp4"); got != "" {
+		t.Errorf("no audio should be empty, got %q", got)
+	}
+}
+
 func TestDefaultSelectionPrefersProgressiveWhenPresent(t *testing.T) {
 	formats := fixtureFormats(t)
 	// Remove every non-HLS video: only the HLS muxed 301 and the HLS-less set

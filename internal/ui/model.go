@@ -34,7 +34,6 @@ type Options struct {
 }
 
 var (
-	kindOptions      = []string{"all", string(format.Muxed), string(format.Video), string(format.Audio), string(format.Image)}
 	containerOptions = []string{"all", "mp4", "webm", "m4a"}
 
 	titleStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("4"))
@@ -44,7 +43,6 @@ var (
 	okStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
 	accentStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
 	audioStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
-	hdrStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("5"))
 	slotStyle     = lipgloss.NewStyle().Background(lipgloss.Color("234")).Padding(0, 1)
 	selectedStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("4"))
 	progressStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("4"))
@@ -57,7 +55,17 @@ const (
 	areaURL area = iota
 	areaQueue
 	areaFormats
+	areaMuxed
 	areaFilter
+)
+
+// stage is what the top explorer table lists: the video streams, or the audio
+// streams that can be merged with the video the user already picked.
+type stage int
+
+const (
+	stageVideo stage = iota
+	stageAudio
 )
 
 type logEntry struct {
@@ -93,6 +101,7 @@ func (p panelHit) insideLoose(y int) bool {
 type hitRegions struct {
 	queue   panelHit
 	formats panelHit
+	muxed   panelHit
 	url     int
 	filter  int
 }
@@ -118,15 +127,23 @@ type Model struct {
 	urlInput    textinput.Model
 	filterInput textinput.Model
 	area        area
-	kindIdx     int
 	contIdx     int
 	onlySize    bool
 	hideHLS     bool
 	compatOnly  bool
 	showLog     bool
 
-	visible   []format.Fmt
-	fmtCursor int
+	// visible is the top explorer table: the video streams, or the audio streams
+	// compatible with the video already chosen. muxed is the second table, shown
+	// only when the row carries progressive (video+audio) formats.
+	visible     []format.Fmt
+	fmtCursor   int
+	muxed       []format.Fmt
+	muxedCursor int
+	stage       stage
+	// stageUID is the job the stage belongs to, so changing rows resets the
+	// explorer back to the video list.
+	stageUID int
 
 	editor *editor
 
@@ -190,6 +207,7 @@ func New(options Options) *Model {
 		height:        32,
 		urlInput:      urlInput,
 		filterInput:   filterInput,
+		showLog:       true,
 		hideHLS:       false,
 		updates:       make(chan format.Job, 256),
 		pending:       map[int]bool{},
@@ -638,6 +656,11 @@ func (m *Model) handleMouse(msg tea.MouseMsg) tea.Cmd {
 			m.fmtCursor = index
 			m.setArea(areaFormats)
 		}
+	case m.hit.muxed.inside(msg.Y):
+		if index, ok := m.hit.muxed.rowAt(msg.Y); ok && index >= 0 && index < len(m.muxed) {
+			m.muxedCursor = index
+			m.setArea(areaMuxed)
+		}
 	}
 	return nil
 }
@@ -645,6 +668,9 @@ func (m *Model) handleMouse(msg tea.MouseMsg) tea.Cmd {
 // scrollMouse routes a wheel event to the panel under the pointer.
 func (m *Model) scrollMouse(y, delta int) tea.Cmd {
 	switch {
+	case m.hit.muxed.insideLoose(y):
+		m.setArea(areaMuxed)
+		m.moveMuxedCursor(delta)
 	case m.hit.formats.insideLoose(y):
 		m.setArea(areaFormats)
 		m.moveFormatCursor(delta)
@@ -675,9 +701,18 @@ func (m *Model) setArea(target area) {
 	}
 }
 
-// cycleArea moves focus through URL → queue → formats → filter and back.
+// cycleArea moves focus through URL → queue → videos → muxed → filter and back,
+// skipping the muxed table when the row has no progressive formats.
 func (m *Model) cycleArea(forward bool) tea.Cmd {
-	order := []area{areaURL, areaQueue, areaFormats, areaFilter}
+	order := []area{areaURL, areaQueue}
+	if m.showsTop() {
+		order = append(order, areaFormats)
+	}
+	if len(m.muxed) > 0 {
+		order = append(order, areaMuxed)
+	}
+	order = append(order, areaFilter)
+
 	index := 0
 	for i, candidate := range order {
 		if candidate == m.area {
@@ -712,26 +747,90 @@ func (m *Model) handleBodyKey(msg tea.KeyMsg) tea.Cmd {
 		return m.filterInput.Focus()
 	}
 
-	if m.area == areaFormats {
+	switch m.area {
+	case areaMuxed:
 		switch key {
 		case "up", "k":
-			m.moveFormatCursor(-1)
+			if m.muxedCursor > 0 {
+				m.muxedCursor--
+			} else if m.showsTop() {
+				m.setArea(areaFormats)
+			}
+			return nil
 		case "down", "j":
+			m.moveMuxedCursor(1)
+			return nil
+		case "pgup":
+			m.moveMuxedCursor(-8)
+			return nil
+		case "pgdown":
+			m.moveMuxedCursor(8)
+			return nil
+		case "home", "g":
+			m.muxedCursor = 0
+			return nil
+		case "end", "G":
+			if len(m.muxed) > 0 {
+				m.muxedCursor = len(m.muxed) - 1
+			}
+			return nil
+		case "left", "esc":
+			if m.showsTop() {
+				m.setArea(areaFormats)
+			} else {
+				m.setArea(areaQueue)
+			}
+			return nil
+		case "enter":
+			m.pickMuxedAtCursor()
+			return nil
+		}
+
+	case areaFormats:
+		switch key {
+		case "up", "k":
+			if m.fmtCursor > 0 {
+				m.fmtCursor--
+			}
+			return nil
+		case "down", "j":
+			if m.fmtCursor >= len(m.visible)-1 && len(m.muxed) > 0 {
+				m.setArea(areaMuxed)
+				m.muxedCursor = 0
+				return nil
+			}
 			m.moveFormatCursor(1)
+			return nil
 		case "pgup":
 			m.moveFormatCursor(-8)
+			return nil
 		case "pgdown":
 			m.moveFormatCursor(8)
+			return nil
 		case "home", "g":
 			m.fmtCursor = 0
+			return nil
 		case "end", "G":
 			if len(m.visible) > 0 {
 				m.fmtCursor = len(m.visible) - 1
 			}
+			return nil
 		case "left", "esc":
-			m.setArea(areaQueue)
+			switch {
+			case m.stage == stageAudio:
+				m.backToVideos()
+			case len(m.visible) == 0 && len(m.muxed) > 0:
+				m.setArea(areaMuxed)
+			default:
+				m.setArea(areaQueue)
+			}
+			return nil
+		case "enter":
+			m.pickAtCursor()
+			return nil
 		}
-	} else {
+
+	default:
 		switch key {
 		case "up", "k":
 			m.moveFocus(-1)
@@ -755,14 +854,6 @@ func (m *Model) handleBodyKey(msg tea.KeyMsg) tea.Cmd {
 	}
 
 	switch key {
-	case "v":
-		if !m.pickVideo(m.currentFormatID()) {
-			m.notify("That row is not a video format.")
-		}
-	case "a":
-		if !m.pickAudio(m.currentFormatID()) {
-			m.notify("That row is not an audio-only format.")
-		}
 	case "e":
 		return m.startEdit()
 	case "d":
@@ -785,12 +876,10 @@ func (m *Model) handleBodyKey(msg tea.KeyMsg) tea.Cmd {
 		if job := m.focusedJob(); job != nil {
 			job.VideoID, job.AudioID = format.DefaultSelection(job.Formats, "")
 			m.markDirty()
-			m.refreshDerived()
+			m.backToVideos()
 		}
 	case "l":
-		m.showLog = !m.showLog
-	case "i":
-		m.cycleKind()
+		m.toggleLog()
 	case "o":
 		m.cycleContainer()
 	case "h":
@@ -811,6 +900,14 @@ func (m *Model) moveFormatCursor(delta int) {
 	m.fmtCursor = clamp(m.fmtCursor+delta, 0, len(m.visible)-1)
 }
 
+func (m *Model) moveMuxedCursor(delta int) {
+	if len(m.muxed) == 0 {
+		m.muxedCursor = 0
+		return
+	}
+	m.muxedCursor = clamp(m.muxedCursor+delta, 0, len(m.muxed)-1)
+}
+
 func (m *Model) moveFocus(delta int) {
 	if len(m.jobs) == 0 {
 		return
@@ -818,11 +915,6 @@ func (m *Model) moveFocus(delta int) {
 	m.focus = clamp(m.focus+delta, 0, len(m.jobs)-1)
 	m.fmtCursor = 0
 	m.refreshDerived()
-}
-
-func (m *Model) cycleKind() {
-	m.kindIdx = (m.kindIdx + 1) % len(kindOptions)
-	m.refreshVisible()
 }
 
 func (m *Model) cycleContainer() {
@@ -968,11 +1060,30 @@ func (m *Model) deleteJob() {
 	m.refreshDerived()
 }
 
-func (m *Model) currentFormatID() string {
+// pickAtCursor applies Enter on the top table: it picks the video and moves on
+// to the audio streams, or picks the audio stream once a video is chosen.
+func (m *Model) pickAtCursor() {
 	if m.fmtCursor < 0 || m.fmtCursor >= len(m.visible) {
-		return ""
+		return
 	}
-	return m.visible[m.fmtCursor].ID
+	id := m.visible[m.fmtCursor].ID
+	if m.stage == stageAudio {
+		if !m.pickAudio(id) {
+			m.notify("That row is not an audio-only format.")
+		}
+		return
+	}
+	if !m.pickVideo(id) {
+		m.notify("That row is not a video format.")
+	}
+}
+
+// pickMuxedAtCursor applies Enter on the progressive table.
+func (m *Model) pickMuxedAtCursor() {
+	if m.muxedCursor < 0 || m.muxedCursor >= len(m.muxed) {
+		return
+	}
+	m.pickMuxed(m.muxed[m.muxedCursor].ID)
 }
 
 func (m *Model) pickVideo(formatID string) bool {
@@ -981,15 +1092,19 @@ func (m *Model) pickVideo(formatID string) bool {
 		return false
 	}
 	candidate := job.Find(formatID)
-	if candidate == nil || (candidate.Kind != format.Video && candidate.Kind != format.Muxed) {
+	if candidate == nil || candidate.Kind != format.Video {
 		return false
 	}
 	job.VideoID = candidate.ID
-	if candidate.Kind == format.Muxed {
-		job.AudioID = ""
+	// Keep the audio choice when it can still be merged, otherwise fall back to
+	// the best compatible track so the row is never silently left without audio.
+	if audio := job.Audio(); audio == nil || !format.IsCompatible(*audio, m.mergeFormat) {
+		job.AudioID = format.BestAudio(job.Formats, m.mergeFormat)
 	}
+	m.stage = stageAudio
 	m.markDirty()
 	m.refreshDerived()
+	m.fmtCursor = indexOfFormat(m.visible, job.AudioID)
 	return true
 }
 
@@ -1008,6 +1123,44 @@ func (m *Model) pickAudio(formatID string) bool {
 	return true
 }
 
+func (m *Model) pickMuxed(formatID string) bool {
+	job := m.focusedJob()
+	if job == nil || formatID == "" {
+		return false
+	}
+	candidate := job.Find(formatID)
+	if candidate == nil || candidate.Kind != format.Muxed {
+		return false
+	}
+	job.VideoID = candidate.ID
+	job.AudioID = ""
+	m.stage = stageVideo
+	m.markDirty()
+	m.refreshDerived()
+	return true
+}
+
+// backToVideos returns the top table to the video list with the cursor on the
+// stream the row already uses.
+func (m *Model) backToVideos() {
+	m.stage = stageVideo
+	m.refreshDerived()
+	m.fmtCursor = 0
+	if job := m.focusedJob(); job != nil {
+		m.fmtCursor = indexOfFormat(m.visible, job.VideoID)
+	}
+}
+
+// indexOfFormat is the row of id in a format table, 0 when it is absent.
+func indexOfFormat(rows []format.Fmt, id string) int {
+	for index, candidate := range rows {
+		if candidate.ID == id {
+			return index
+		}
+	}
+	return 0
+}
+
 // ---------------------------------------------------------------------------
 // derived state
 // ---------------------------------------------------------------------------
@@ -1023,36 +1176,127 @@ func (m *Model) currentFilters() format.Filters {
 		OnlyWithSize: m.onlySize,
 		HideHLS:      m.hideHLS,
 	}
-	if m.kindIdx > 0 && m.kindIdx < len(kindOptions) {
-		filters.Kind = kindOptions[m.kindIdx]
-	}
 	if m.contIdx > 0 && m.contIdx < len(containerOptions) {
 		filters.Container = containerOptions[m.contIdx]
 	}
 	return filters
 }
 
+// showsTop reports whether the video/audio table has anything to draw. The
+// progressive table takes the whole area when the top one is empty.
+func (m *Model) showsTop() bool {
+	return len(m.visible) > 0 || len(m.muxed) == 0
+}
+
+// refreshVisible rebuilds both explorer tables: the video list (or, once a video
+// is chosen, the audio streams that can be merged with it) and the progressive
+// formats shown underneath.
 func (m *Model) refreshVisible() {
 	job := m.focusedJob()
 	if job == nil {
-		m.visible = nil
-		m.fmtCursor = 0
+		m.visible, m.muxed = nil, nil
+		m.fmtCursor, m.muxedCursor = 0, 0
+		m.stage, m.stageUID = stageVideo, 0
 		return
 	}
-	visible := format.ApplyFilters(job.Formats, m.currentFilters())
+	// The explorer belongs to one row: changing rows starts again at the videos.
+	if job.UID != m.stageUID {
+		m.stage = stageVideo
+		m.stageUID = job.UID
+	}
+
+	kept := format.ApplyFilters(job.Formats, m.currentFilters())
 	if m.compatOnly {
-		kept := visible[:0]
-		for _, candidate := range visible {
+		compatible := kept[:0]
+		for _, candidate := range kept {
 			if format.IsCompatible(candidate, m.mergeFormat) {
-				kept = append(kept, candidate)
+				compatible = append(compatible, candidate)
 			}
 		}
-		visible = kept
+		kept = compatible
 	}
-	m.visible = visible
-	if m.fmtCursor >= len(visible) {
-		m.fmtCursor = max(0, len(visible)-1)
+
+	var videos, audios, muxed []format.Fmt
+	for _, candidate := range kept {
+		switch candidate.Kind {
+		case format.Video:
+			videos = append(videos, candidate)
+		case format.Audio:
+			audios = append(audios, candidate)
+		case format.Muxed:
+			muxed = append(muxed, candidate)
+		}
 	}
+	m.muxed = muxed
+
+	// A source without separate video streams has nothing to pick first, so it
+	// drops straight to the audio list.
+	if m.stage == stageVideo && len(videos) == 0 && len(audios) > 0 {
+		m.stage = stageAudio
+	}
+	if m.stage == stageVideo {
+		m.visible = containerVideos(videos, m.mergeFormat)
+		if len(m.visible) == 0 {
+			m.visible = videos // never a dead end: offer everything, flagged
+		}
+	} else {
+		m.visible = mergeableAudio(audios, m.mergeFormat)
+		if len(m.visible) == 0 {
+			m.visible = audios // never a dead end: offer everything, flagged
+		}
+	}
+
+	if m.fmtCursor >= len(m.visible) {
+		m.fmtCursor = max(0, len(m.visible)-1)
+	}
+	if m.muxedCursor >= len(m.muxed) {
+		m.muxedCursor = max(0, len(m.muxed)-1)
+	}
+	if len(m.muxed) == 0 && m.area == areaMuxed {
+		m.setArea(areaFormats)
+	}
+	if len(m.visible) == 0 && len(m.muxed) > 0 && m.area == areaFormats {
+		m.setArea(areaMuxed)
+	}
+}
+
+// containerVideos keeps the video streams that already carry the merge
+// container's extension, so the table only offers files that need no re-mux.
+// Containers that take anything (mkv) or an unknown format skip the filter.
+func containerVideos(videos []format.Fmt, mergeFormat string) []format.Fmt {
+	want := ""
+	switch format.ContainerFamily(mergeFormat) {
+	case "":
+		want = "" // the user's yt-dlp default: do not guess
+	case "mkv":
+		want = ""
+	case "webm":
+		want = "webm"
+	default:
+		want = "mp4"
+	}
+	if want == "" {
+		return videos
+	}
+	kept := make([]format.Fmt, 0, len(videos))
+	for _, candidate := range videos {
+		if candidate.Ext == want {
+			kept = append(kept, candidate)
+		}
+	}
+	return kept
+}
+
+// mergeableAudio keeps the audio streams the chosen video can be merged with,
+// so the second step only offers tracks that will not need a re-encode.
+func mergeableAudio(audios []format.Fmt, mergeFormat string) []format.Fmt {
+	kept := make([]format.Fmt, 0, len(audios))
+	for _, candidate := range audios {
+		if format.IsCompatible(candidate, mergeFormat) {
+			kept = append(kept, candidate)
+		}
+	}
+	return kept
 }
 
 func (m *Model) containerLabel() string {
@@ -1060,6 +1304,25 @@ func (m *Model) containerLabel() string {
 		return "compatible"
 	}
 	return m.mergeFormat
+}
+
+// logFits reports whether the terminal has room for the vertical log panel.
+func (m *Model) logFits() bool {
+	return m.width >= minLogWidth && m.height >= minLogHeight
+}
+
+// toggleLog opens or closes the log. On a terminal too small for the panel the
+// log stays hidden instead of squeezing the tables.
+func (m *Model) toggleLog() {
+	if m.showLog {
+		m.showLog = false
+		return
+	}
+	if !m.logFits() {
+		m.notify(fmt.Sprintf("The log needs at least %dx%d.", minLogWidth, minLogHeight))
+		return
+	}
+	m.showLog = true
 }
 
 func (m *Model) writeLog(level, text string) {
