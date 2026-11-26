@@ -94,7 +94,7 @@ empaqueta: se detecta, se reporta en `--check` y la UI avisa al arrancar.
 | T8 | S6.3 | inline | done — `internal/store` (state dir por OS, JSON atómico, dedupe/UIDs, resume de descargas interrumpidas) + cableado en `ui.New`/`Init` con flush cada 2 s + 8 tests | este slice |
 | T9 | S6.1, S6.2, S6.4 | inline | done — caja con borde y título para URL/cola/formatos/log, log vertical de ancho completo del cuerpo, progreso en la celda `estado` y %/velocidad/ETA en la meta + 4 tests | este slice |
 | T10 | S7.1–S7.5 | inline | done — explorador partido en videos/muxed, selección Enter-only con `stage`/`stageUID`, audios filtrados por compatibilidad, `format.BestAudio`, columnas por tabla y log abierto con auto-hide + 11 tests nuevos | este slice |
-| T11 | S8.1–S8.3 | inline | done — `Manager.OnLine` reenvía el chatter de yt-dlp al log (tope 40, sin repetidas), décimas por debajo de 10% y `Path` del archivo mergeado; 7 tests nuevos, test de pantalla sin carrera tras `8ede055` | `8af0413` + `8ede055` |
+| T11 | S8.1–S8.3 | inline | done — `Manager.OnLine` reenvía el chatter de yt-dlp al log (tope 40, sin repetidas), décimas por debajo de 10% y `Path` del archivo mergeado; 7 tests nuevos, test de pantalla sin carrera tras `3414552` | `dfc4547` + `3414552` |
 
 ## Log
 
@@ -210,7 +210,7 @@ empaqueta: se detecta, se reporta en `--check` y la UI avisa al arrancar.
 - **L25** (review finding, accepted): el test de pantalla nuevo leía
   `model.logLines` desde la goroutine del test mientras `program.Run()`
   escribía en ese slice; `go test -race` lo confirmó
-  (`writeLog`/`startAll` vs. `logHas`). Corregido en `8ede055`: el test ahora
+  (`writeLog`/`startAll` vs. `logHas`). Corregido en `3414552`: el test ahora
   alimenta el modelo directo por `waitLog` en la goroutine del test, sin
   `tea.Program`, sin sleeps y sin estado compartido, y además fija el prefijo
   `#<fila>` y el borde 9.94→9.95→10 con ancho de celda constante.
@@ -222,3 +222,11 @@ empaqueta: se detecta, se reporta en `--check` y la UI avisa al arrancar.
   `gentle-ai review mode disable --scope clone`, que deja RDD apagado solo en
   este clon (global sigue en `on`). Reencenderlo: `gentle-ai review mode
   enable --scope clone`, después de arreglar el nombre del modelo.
+- **L27** (user decision): "saca todo el python del proyecto, ahora esto es puro
+  go". `ytd.py` —el binario Go de 7.8 MB que había quedado commiteado— salió del
+  árbol y también de la historia de la rama: rebase sobre `5c77195` quitando ese
+  blob de `9c5d99e`, con los commits reescritos a
+  `08493fb`/`dfc4547`/`3414552`/`797178e` (backup en
+  `backup/go-migration-before-purge`). `.gitignore` pierde `.venv/` y gana `/ytd`
+  para que un build local no vuelva a commitearse. No queda ningún `.py` en el
+  repo.
