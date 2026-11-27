@@ -3,8 +3,9 @@
 A queue TUI for [yt-dlp](https://github.com/yt-dlp/yt-dlp): paste URLs, pick the
 exact video and audio streams, and watch several downloads at once.
 
-It is a single Go binary. On first use it downloads its own `yt-dlp` and `deno`
-into a cache directory, so a fresh machine needs nothing but `ffmpeg`.
+It is a single Go binary. It downloads its own `yt-dlp` and `deno` into a cache
+directory; a prebuilt binary needs only `ffmpeg`. Installing from source also
+requires Go 1.26.5+.
 
 ```
 ┌ ytd — yt-dlp queue                                    out ~/Downloads
@@ -27,20 +28,37 @@ into a cache directory, so a fresh machine needs nothing but `ffmpeg`.
 
 ## Install
 
-Requirements: `ffmpeg` on `PATH`. Everything else is handled by the binary.
+The installers download the current source, build `ytd`, and install it. They
+require Go 1.26.5+ and an internet connection. The app downloads and updates its
+own `yt-dlp` and `deno`; `ffmpeg` must be installed separately and available on
+`PATH` for merging separate video and audio streams.
 
-- **Prebuilt binary** — grab the archive for your OS/arch from the releases page,
-  unpack it, and put `ytd` somewhere on `PATH`.
-- **From source** — needs Go 1.26+:
+### Linux and macOS
 
-  ```sh
-  git clone <repo> ~/tools/ytd && cd ~/tools/ytd
-  ./install.sh              # Linux/macOS → ~/.local/bin
-  .\install.ps1             # Windows → %LOCALAPPDATA%\ytd\bin
-  ```
+Run in Bash:
 
-  Both scripts build with `-trimpath -ldflags "-s -w"`, run `ytd --update` and
-  then `ytd --check`.
+```sh
+curl -fsSL https://raw.githubusercontent.com/HectorYanes/ytd/main/install.sh | bash
+```
+
+### Windows
+
+Run in PowerShell:
+
+```powershell
+$installer = curl.exe -fsSL https://raw.githubusercontent.com/HectorYanes/ytd/main/install.ps1
+if ($LASTEXITCODE -ne 0) { throw "Could not download the ytd installer." }
+Invoke-Expression ($installer -join "`n")
+```
+
+The Windows installer puts `ytd.exe` in `%LOCALAPPDATA%\ytd\bin` and adds that
+directory to the user `PATH`. On Linux and macOS, the installer puts `ytd` in
+`~/.local/bin` by default and prints a PATH instruction if needed. Both
+installers can also be run from a source checkout with `./install.sh` or
+`.\install.ps1`; they build the checkout instead of downloading it.
+
+Prebuilt binaries can also be used when available on the
+[releases page](https://github.com/HectorYanes/ytd/releases).
 
 ## First run
 
